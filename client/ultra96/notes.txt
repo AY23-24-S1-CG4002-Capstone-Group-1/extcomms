@@ -1,0 +1,5 @@
+should be working, need to be able to reach eval server from fpga.
+
+TODO
+test 2 players
+make eval robust

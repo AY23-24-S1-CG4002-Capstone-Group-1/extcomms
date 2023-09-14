@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CG4002 Eval</title>
+    <style>
+    body {
+      background-image: url('images/76_bw.jpg');
+      }
+    .form-center {
+        display:flex;
+        align-items: center;
+        justify-content: center;
+        height:50vh;
+        }
+    </style>
+
+</head>
+<body>
+<script>
+    function login() {
+        var group_name = document.getElementById("group_name").value;
+        var num_player = document.querySelector('input[name="num_player"]:checked').value;
+        var password   = document.getElementById("password").value;
+
+        if (typeof(Storage) !== "undefined") {
+            // store the data to persist for the session
+            sessionStorage.group_name = group_name;
+            sessionStorage.num_player = num_player;
+            sessionStorage.password   = password;
+
+            // load the game page
+            location.assign(num_player+"_player.html");
+        } else {
+            alert ("Sorry, your browser does not support web storage...");
+        }
+        return false; //prevent the default behavior of the submit event
+    }
+</script>
+<div class="form-center">
+    <form onsubmit="return login()">
+        <h2>CG4002 Eval Server</h2>
+        <label for="group_name">Group name:</label><br>
+        <select id="group_name" name="group_name">
+            <option value="B01">B01</option>
+            <option value="B02">B02</option>
+            <option value="B03">B03</option>
+            <option value="B04">B04</option>
+            <option value="B05">B05</option>
+            <option value="B06">B06</option>
+            <option value="B07">B07</option>
+            <option value="B08">B06</option>
+            <option value="B09">B07</option>
+            <option value="B10">B06</option>
+            <option value="B11">B01</option>
+            <option value="B12">B02</option>
+            <option value="B13">B03</option>
+            <option value="B14">B04</option>
+            <option value="B15">B05</option>
+            <option value="B16">B06</option>
+            <option value="B17">B07</option>
+            <option value="B18">B06</option>
+            <option value="B19">B07</option>
+        </select><br>
+        <label for="password">Password (16 char):</label><br>
+        <input type="password" id="password" placeholder="Eval client password"
+               minlength="16" maxlength="16" required><br>
+
+        <input type="radio" id="1_player" name="num_player" value="1">
+        <label for="1_player">1 player mode</label><br>
+        <input type="radio" id="2_player" name="num_player" value="2" checked="checked">
+        <label for="1_player">2 player mode</label><br><br>
+        <input type="submit" value="LOGIN">
+    </form>
+</div>
+
+<!--Initially planned to display log messages-->
+<!--<div id="info";-->
+<!--     style="display:flex;-->
+<!--     align-items: center;-->
+<!--    justify-content: center;-->
+<!--    height:30vh;-->
+<!--    border:2px solid #ccc;-->
+<!--    font:16px/26px Georgia, Garamond, Serif;-->
+<!--    color: silver; background: black;-->
+<!--    background-color: rgba(0,0,0,.6);-->
+<!--    overflow:auto;-->
+<!--    margin-top: 5vh;-->
+<!--    margin-right: 10vw;-->
+<!--    margin-left: 10vw;">-->
+<!--    Log Messages-->
+<!--</div>-->
+</body>
+</html>
