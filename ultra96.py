@@ -1,9 +1,12 @@
+import sys
 import socket
 import base64
 import json
 import asyncio
 import random
 import threading
+
+from engine import GameState
 
 from time import perf_counter
 from Crypto import Random
@@ -14,30 +17,17 @@ from paho.mqtt import client as mqttclient
 
 
 engine_to_eval_queue = Queue()
+eval_to_engine_queue = Queue()
 
 mqtt_vizhit_queue = Queue()
-mqtt_motion_queue = Queue()
+relay_mlai_queue = Queue()
 
-game_state = {
-        "p1": {
-            "hp":100,
-            "bullets":6,
-            "grenades":2,
-            "shield_hp":0,
-            "deaths":0,
-            "shields":3
-        }, 
-        "p2": {
-            "hp":100,
-            "bullets":6,
-            "grenades":2,
-            "shield_hp":0,
-            "deaths":0,
-            "shields":3
-        }
-    }
+draw_queue = Queue()
 
-class EvalClient:
+debug = False
+
+# This thread reads from the engine_to_eval_queue and sends all valid actions to the eval server.
+class EvalClientThread:
     
     def __init__(self, ip_addr, port, secret_key):
         self.ip_addr        = ip_addr
@@ -111,7 +101,9 @@ class EvalClient:
         else:
             timeout = -1
 
-        print(msg)
+        global debug
+        if debug is True:
+            print("Evalclient received: " + msg)
 
         return success, timeout, msg
 
@@ -142,12 +134,26 @@ class EvalClient:
 
         while True:
             if not engine_to_eval_queue.empty():
-                msg = engine_to_eval_queue.get()
-                print("sending json:" + json.dumps(msg))
-                await self.send_message(json.dumps(msg))
+                msg = json.loads(engine_to_eval_queue.get()) # get valid actions from engine and send it to eval server
+
+                x = {
+                    "player_id": msg["player_id"],
+                    "action": msg["action"],
+                    "game_state": msg["game_state"]
+                }
+
+                global debug
+                if debug is True:
+                    print("sending json to eval server:" + json.dumps(x))
+
+                await self.send_message(json.dumps(x))
+
                 success, timeout, text_received = await self.receive_message(self.timeout)
+
                 if success:
-                    data = json.loads(text_received)
+                    eval_to_engine_queue.put(text_received)
+                else:
+                    print("WARNING! NO REPLY RECEIVED FROM EVAL_SERVER")
 
 
     def run(self):
@@ -157,12 +163,13 @@ class EvalClient:
             pass
 
 
-class RelayCommsClient:
+# This thread (1 for each player) connects to relay via TCP and passes received data to the classification (MLAI) thread. 
+class RelayCommsThread:
 
     def __init__(self, sn):
         self.sn = sn
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(('', 10000 + self.sn))
+        self.sock.bind(('', 10000 + self.sn)) # Binds to p1 relay on 10001, p2 relay on 10002
 
 
     def send_message(self, msg):
@@ -174,23 +181,27 @@ class RelayCommsClient:
 
     def handle_relay(self, conn):
         while True:
-            msg = conn.recv()
-            print("motion received put on queue: " + json.dumps(msg))
-            mqtt_motion_queue.put(json.dumps(msg))
+            msg = conn.recv(1024).decode("utf-8") # TODO: Change recv(1024)
+            global debug
+            if debug is True:
+                print("motion received put on queue: " + msg)
+            relay_mlai_queue.put(json.loads(msg)) # Identify action
 
     
     def run(self):
 
         self.sock.listen()
-        print("relay-ultra96 thread " + str(self.sn) + " listening")
+        global debug
+        if debug is True:
+            print("relay-ultra96 thread " + str(self.sn) + " listening")
 
         while True:
             (conn, address) = self.sock.accept()
-            # now do something with the clientsocket
-            # in this case, we'll pretend this is a threaded server
             self.handle_relay(conn)
 
 
+# This thread will from the relay_mlai_queue and identify the actions from sensor data, then publish it to the visualiser via MQTT. 
+# For now it just forwards data to the visualizer via MQTT.
 class ClassificationThread:
 
     def __init__(self, sn):
@@ -200,11 +211,19 @@ class ClassificationThread:
     def connect_mqtt(self):
         # Set Connecting Client ID
         client = mqttclient.Client(f'python-mqtt-{random.randint(0, 1000)}')
+        client.on_connect = self.on_connect
         # client.username_pw_set(username, password)
         client.connect('broker.emqx.io', 1883)
         return client
     
 
+    def on_connect(self,client, userdata, flags, rc):
+        if rc == 0:
+            print("Connected to MQTT Broker!")
+        else:
+            print("Failed to connect, return code %d\n", rc)
+
+            
     def run(self):
         mqttclient = self.connect_mqtt()
         mqttclient.loop_start()
@@ -212,40 +231,67 @@ class ClassificationThread:
         mqttclient.subscribe("lasertag/vizgamestate")
 
         while True:
-            if not mqtt_motion_queue.empty():
-                msg = mqtt_motion_queue.get()
+            if not relay_mlai_queue.empty():
+                msg = relay_mlai_queue.get()
                 # identify action
-                global game_state
                 x = {
+                    "type": "QUERY",
                     "player_id": msg["player_id"],
                     "action": msg["action"],
-                    "game_state": game_state
                 }
-                print("motion data forwarded to viz:" + json.dumps(x))
+                global debug
+                if debug is True:
+                    print("motion data forwarded to viz:" + json.dumps(x))
                 mqttclient.publish("lasertag/vizgamestate", json.dumps(x))
 
 
+# This thread reads from the draw_queue, and publishes via MQTT for the visualiser to draw.
+class VisualiserUpdateThread:
+
+    def connect_mqtt(self):
+        # Set Connecting Client ID
+        client = mqttclient.Client(f'python-mqtt-{random.randint(0, 1000)}')
+        client.on_connect = self.on_connect
+        # client.username_pw_set(username, password)
+        client.connect('broker.emqx.io', 1883)
+        return client
+    
+
+    def on_connect(self,client, userdata, flags, rc):
+        if rc == 0:
+            print("Connected to MQTT Broker!")
+        else:
+            print("Failed to connect, return code %d\n", rc)
+
+            
+    def run(self):
+        mqttclient = self.connect_mqtt()
+        mqttclient.loop_start()
+
+        mqttclient.subscribe("lasertag/vizgamestate")
+
+        while True:
+            if not draw_queue.empty():
+                msg = json.loads(draw_queue.get())
+                x = {
+                    "type": "UPDATE",
+                    "player_id": msg["player_id"],
+                    "action": msg["action"],
+                    "game_state": msg["game_state"]
+                }
+                global debug
+                if debug is True:
+                    print("final update forwarded to viz:" + json.dumps(x))
+                mqttclient.publish("lasertag/vizgamestate", json.dumps(x))
+
+
+# This is the game engine. It receives hit confirmations via MQTT and updates the game state accordingly. If it is a hit (valid action) it passes the
+# action and game state to the eval_client for verification. It then puts the updated game state on the draw queue.
 class GameEngine:
 
     def __init__(self) -> None:
-        self.game_state     = {
-                        "p1": {
-                            "hp":100,
-                            "bullets":6,
-                            "grenades":2,
-                            "shield_hp":0,
-                            "deaths":0,
-                            "shields":3
-                        }, 
-                        "p2": {
-                            "hp":100,
-                            "bullets":6,
-                            "grenades":2,
-                            "shield_hp":0,
-                            "deaths":0,
-                            "shields":3
-                        }
-                    }
+        self.game_state = GameState()
+
 
     def connect_mqtt(self):
         # Set Connecting Client ID
@@ -277,26 +323,50 @@ class GameEngine:
 
         while True:
             if not mqtt_vizhit_queue.empty():
-                # these are valid actions (actions that land because opposing player is within viz)
+                # get actions from vizhit
                 msg = mqtt_vizhit_queue.get()
-                print("Engine update:" + str(msg))
+
+                global debug
+                if debug is True:
+                    print("Engine update:" + str(msg))
+
                 # update gamestate
-                # XXXXXXXXXXXXXXXXXXXXXXXXX
+                self.game_state.update(msg) 
+
                 x = {
                     "player_id": msg["player_id"],
                     "action": msg["action"],
-                    "game_state": self.game_state
+                    "game_state": self.game_state.get_dict()
                 }
-                engine_to_eval_queue.put(x)
+                        
+                # we only send valid actions (hits) to the eval_server
+                if (msg["isHit"] == True):
+                    engine_to_eval_queue.put(json.dumps(x))
 
-# home
-host = "192.168.56.1"
-# nus-stu
-# host = "192.168.137.1" 
-# actual server, port is 8001
-# host = "cg4002-i.comp.nus.edu.sg"
+                    # NOTE: THIS IS BLOCKING because we need verification from eval server, and we want to avoid desync
+                    eval_server_game_state = json.loads(eval_to_engine_queue.get()) 
+                    
+                    # overwrite our game state with the eval server's if ours is wrong
+                    if (eval_server_game_state != self.game_state.get_dict()): 
+                        print("WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
+                        self.game_state.overwrite(eval_server_game_state)
 
-# for manual testing    
+                # put updated game state on queue for drawing
+                x = {
+                    "player_id": msg["player_id"],
+                    "action": msg["action"],
+                    "isHit": msg["isHit"],
+                    "game_state": self.game_state.get_dict()
+                }
+                draw_queue.put(json.dumps(x))
+                    
+
+# actual server
+# host = "172.25.76.133"
+ 
+host = "127.0.0.1"
+
+
 while True:
     try:
         port = int(input("Enter port:"))
@@ -314,40 +384,39 @@ while True:
         print("Connection refused.")
         continue
 
+
+if sys.argv[1] == "1":
+    debug = True
+
 secret_key = bytes(str('1111111111111111'), encoding="utf8")  # Convert password to bytes
 
-# port is 8001 for actual server
-eval_client = EvalClient(host, port, secret_key)
-relaycomms_client1 = RelayCommsClient(1)
-classification_thread1 = ClassificationThread(1)
-# relaycomms_client2 = RelayCommsClient(2)
-# classification_thread2 = ClassificationThread(2)
+eval_client = EvalClientThread(host, port, secret_key)
+relaycomms_client1 = RelayCommsThread(1)
+relaycomms_client2 = RelayCommsThread(2)
+classification_thread = ClassificationThread()
 game_engine = GameEngine()
+viz_draw = VisualiserUpdateThread()
 
 evalclient = threading.Thread(target=eval_client.run)
 relay1 = threading.Thread(target=relaycomms_client1.run)
-class1 = threading.Thread(target=classification_thread1.run)
-# relay2 = threading.Thread(target=relaycomms_client2.run)
-# class2 = threading.Thread(target=classification_thread2.run)
+relay2 = threading.Thread(target=relaycomms_client2.run)
+classification = threading.Thread(target=classification_thread.run)
 engine = threading.Thread(target=game_engine.run)
-
-# currently 3 threads
-# possibilities: 2 threads for receiving motion data, 1 dedicated thread for forwarding actions to viz, right now
-#  all are handled by motion_handler
+draw = threading.Thread(target=viz_draw.run)
 
 evalclient.start()
 relay1.start()
-class1.start()
-# relay2.start()
-# class2.start()
+relay2.start()
+classification.start()
 engine.start()
+draw.start()
 
 evalclient.join()
 relay1.join()
-class1.join()
-# relay2.join()
-# class2.join()
+relay2.join()
+classification.join()
 engine.join()
+draw.join
 
 
 

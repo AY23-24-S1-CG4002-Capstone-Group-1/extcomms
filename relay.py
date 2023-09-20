@@ -1,7 +1,5 @@
 import socket
 import json
-import sshtunnel
-import paramiko
 
 class RelayClient:
 
@@ -15,19 +13,7 @@ class RelayClient:
 
     
     def run(self):
-        # stu tunnel
-        tunnel1 = sshtunnel.SSHTunnelForwarder(
-            ('makerslab-fpga-01.d2.comp.nus.edu.sg', 22),
-            ssh_username = 'xilinx',
-            ssh_password = "xilinx",
-            remote_bind_address = ('192.168.3.1', 10000 + self.sn),
-            local_bind_address = ('127.0.0.1', 10000)
-        )
-
-        tunnel1.start()
-        print("sshtunnel1 connected")
-
-        self.sock.connect(('127.0.0.1', tunnel1.local_bind_port))
+        self.sock.connect(('makerslab-fpga-01.d2.comp.nus.edu.sg', 10000 + self.sn)) 
 
         while True:
             command = input("Enter command: ")

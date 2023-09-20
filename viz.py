@@ -49,6 +49,7 @@ class GameEngine:
                     player_id = x[0]
                     action = x[1]
                     x = {
+                        "type": "UPDATE",
                         "player_id": player_id,
                         "action": action,
                         "game_state": self.game_state.get_dict()

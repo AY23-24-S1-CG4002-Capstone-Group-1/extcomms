@@ -1,3 +1,5 @@
+from collections import namedtuple
+
 class Player:
 
     def __init__(self):
@@ -69,7 +71,7 @@ class Player:
 
 
     def shield(self):
-        if self.num_shield > 0:
+        if self.num_shield > 0 and self.hp_shield == 0:
             self.hp_shield = self.max_shield_health
             self.num_shield -= 1
         else:
@@ -100,6 +102,7 @@ class GameState:
     def get_dict(self):
         data = {'p1': self.p1.get_dict(), 'p2': self.p2.get_dict()}
         return data
+
 
     def __str__(self):
         return str(self.get_dict())
@@ -140,5 +143,21 @@ class GameState:
         else:
             # invalid
             pass
+
+
+    def overwrite(self, eval_server_game_state):
+        self.p1.hp = eval_server_game_state["p1"]["hp"]
+        self.p1.num_bullets = eval_server_game_state["p1"]["bullets"]
+        self.p1.num_grenades = eval_server_game_state["p1"]["grenades"]
+        self.p1.num_shield = eval_server_game_state["p1"]["shields"]
+        self.p1.hp_shield = eval_server_game_state["p1"]["shield_hp"]
+        self.p1.num_deaths = eval_server_game_state["p1"]["deaths"]
+
+        self.p2.hp = eval_server_game_state["p2"]["hp"]
+        self.p2.num_bullets = eval_server_game_state["p2"]["bullets"]
+        self.p2.num_grenades = eval_server_game_state["p2"]["grenades"]
+        self.p2.num_shield = eval_server_game_state["p2"]["shields"]
+        self.p2.hp_shield = eval_server_game_state["p2"]["shield_hp"]
+        self.p2.num_deaths = eval_server_game_state["p2"]["deaths"]
 
  
