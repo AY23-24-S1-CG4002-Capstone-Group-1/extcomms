@@ -22,7 +22,7 @@ class RelayClient:
                 break
             else:
                 x = {
-                    "player_id": 1,
+                    "player_id": self.sn,
                     "action": command,
                 }
                 self.send_message(json.dumps(x))

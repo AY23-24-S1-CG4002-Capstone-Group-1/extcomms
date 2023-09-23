@@ -48,6 +48,12 @@ class GameEngine:
                     x = command.split()
                     player_id = x[0]
                     action = x[1]
+                    y = {
+                        "player_id": player_id,
+                        "action": action,
+                        "isHit": True
+                    }
+                    self.game_state.update(y)
                     x = {
                         "type": "UPDATE",
                         "player_id": player_id,
@@ -56,12 +62,7 @@ class GameEngine:
                     }
                     mqttclient.publish("lasertag/vizgamestate", json.dumps(x))
                     print("sent:" + json.dumps(x))
-                    y = {
-                        "player_id": player_id,
-                        "action": action,
-                        "isHit": True
-                    }
-                    self.game_state.update(y)
+
                 except:
                     print("error, enter player_id and action eg: 1 gun")
                     pass

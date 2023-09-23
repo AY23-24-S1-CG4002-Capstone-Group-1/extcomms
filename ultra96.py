@@ -3,7 +3,6 @@ import socket
 import base64
 import json
 import asyncio
-import random
 import threading
 
 from engine import GameState
@@ -25,6 +24,11 @@ relay_mlai_queue = Queue()
 draw_queue = Queue()
 
 debug = False
+noDupes = False
+p1flag = False
+p2flag = False
+relay1Disconnected = False
+relay2Disconnected = False
 
 # This thread reads from the engine_to_eval_queue and sends all valid actions to the eval server.
 class EvalClientThread:
@@ -195,22 +199,27 @@ class RelayCommsThread:
         if debug is True:
             print("relay-ultra96 thread " + str(self.sn) + " listening")
 
-        while True:
-            (conn, address) = self.sock.accept()
-            self.handle_relay(conn)
+        try:
+            while True:
+                (conn, address) = self.sock.accept()
+                self.handle_relay(conn)
+        except:
+            global relay1Disconnected
+            global relay2Disconnected
+            print("WARNING! Relay " + str(self.sn) + " disconnected.")
+            if (self.sn == 1):
+                relay1Disconnected = True
+            else:
+                relay2Disconnected = True
 
 
 # This thread will from the relay_mlai_queue and identify the actions from sensor data, then publish it to the visualiser via MQTT. 
 # For now it just forwards data to the visualizer via MQTT.
 class ClassificationThread:
 
-    def __init__(self, sn):
-        self.sn = sn
- 
-
     def connect_mqtt(self):
         # Set Connecting Client ID
-        client = mqttclient.Client(f'python-mqtt-{random.randint(0, 1000)}')
+        client = mqttclient.Client(f'lasertagb01-class')
         client.on_connect = self.on_connect
         # client.username_pw_set(username, password)
         client.connect('broker.emqx.io', 1883)
@@ -233,12 +242,16 @@ class ClassificationThread:
         while True:
             if not relay_mlai_queue.empty():
                 msg = relay_mlai_queue.get()
+                player_id = msg["player_id"]
+                action = msg["action"]
+                
                 # identify action
                 x = {
                     "type": "QUERY",
-                    "player_id": msg["player_id"],
-                    "action": msg["action"],
+                    "player_id": player_id,
+                    "action": action,
                 }
+
                 global debug
                 if debug is True:
                     print("motion data forwarded to viz:" + json.dumps(x))
@@ -250,7 +263,7 @@ class VisualiserUpdateThread:
 
     def connect_mqtt(self):
         # Set Connecting Client ID
-        client = mqttclient.Client(f'python-mqtt-{random.randint(0, 1000)}')
+        client = mqttclient.Client(f'lasertagb01-vizupdate')
         client.on_connect = self.on_connect
         # client.username_pw_set(username, password)
         client.connect('broker.emqx.io', 1883)
@@ -275,6 +288,7 @@ class VisualiserUpdateThread:
                 msg = json.loads(draw_queue.get())
                 x = {
                     "type": "UPDATE",
+                    "isHit": msg["isHit"],
                     "player_id": msg["player_id"],
                     "action": msg["action"],
                     "game_state": msg["game_state"]
@@ -295,7 +309,7 @@ class GameEngine:
 
     def connect_mqtt(self):
         # Set Connecting Client ID
-        client = mqttclient.Client(f'python-mqtt-{random.randint(0, 1000)}')
+        client = mqttclient.Client(f'lasertagb01-engine')
         client.on_connect = self.on_connect
         # client.username_pw_set(username, password)
         client.connect('broker.emqx.io', 1883)
@@ -321,6 +335,12 @@ class GameEngine:
         mqttclient.subscribe("lasertag/vizhit")
         mqttclient.on_message = self.on_message
 
+        global p1flag
+        global p2flag
+
+        global relay1Disconnected
+        global relay2Disconnected
+
         while True:
             if not mqtt_vizhit_queue.empty():
                 # get actions from vizhit
@@ -330,8 +350,28 @@ class GameEngine:
                 if debug is True:
                     print("Engine update:" + str(msg))
 
+                # if we check for dupes we do not accept dupes from the same player
+                if noDupes is True:
+                    player_id = msg["player_id"]
+                    if player_id == "1" and p1flag == True:
+                        continue
+                    if player_id == "2" and p2flag == True:
+                        continue
+
+                    # never allow a player to send 2 consecutive actions in the same round (2 player)
+                    if player_id == "1":
+                        if p2flag == True:
+                            p2flag = False
+                        else:
+                            p1flag = True
+                    else:
+                        if p1flag == True:
+                            p1flag = False
+                        else:
+                            p2flag = True
+
                 # update gamestate
-                self.game_state.update(msg) 
+                valid = self.game_state.update(msg) 
 
                 x = {
                     "player_id": msg["player_id"],
@@ -351,13 +391,103 @@ class GameEngine:
                         print("WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
                         self.game_state.overwrite(eval_server_game_state)
 
+                if (valid): # only draw valid actions
+                    action = msg["action"]
+                else:
+                    action = "none"
+
                 # put updated game state on queue for drawing
                 x = {
                     "player_id": msg["player_id"],
-                    "action": msg["action"],
+                    "action": action,
                     "isHit": msg["isHit"],
                     "game_state": self.game_state.get_dict()
                 }
+                draw_queue.put(json.dumps(x))
+
+            # # worst case scenario we just spam guns 
+            # elif relay1Disconnected == True or relay2Disconnected == True:
+                
+            #     if noDupes:
+            #         if p1flag == True:
+            #             player_id = 2
+            #             if p2flag == True:
+            #                 print("This statement should not be reached.")
+            #             else:
+            #                 p1flag = False
+            #         else:
+            #             player_id = 1
+            #             if p2flag == True:
+            #                 p1flag = False
+            #             else:
+            #                 p1flag = True
+            #     else:
+            #         player_id = 1
+
+            #     x = {
+            #         "player_id": player_id,
+            #         "action": "gun",
+            #         "isHit": True,
+            #         "game_state": self.game_state.get_dict()
+            #     }
+            #     engine_to_eval_queue.put(json.dumps(x))
+
+            #     # NOTE: THIS IS BLOCKING because we need verification from eval server, and we want to avoid desync
+            #     eval_server_game_state = json.loads(eval_to_engine_queue.get()) 
+                
+            #     # overwrite our game state with the eval server's if ours is wrong
+            #     if (eval_server_game_state != self.game_state.get_dict()): 
+            #         print("WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
+            #         self.game_state.overwrite(eval_server_game_state)
+                
+            #     draw_queue.put(json.dumps(x))
+
+             # worst case scenario we just spam guns 
+            elif relay1Disconnected == True or relay2Disconnected == True:
+                
+                if noDupes:
+                    if p1flag == True:
+                        if relay2Disconnected == True:
+                            player_id = 2
+                        else:
+                            continue
+
+                        if p2flag == True:
+                            print("This statement should not be reached.")
+                        else:
+                            p1flag = False
+                    else:
+                        if relay1Disconnected == True:
+                            player_id = 1
+                        else:
+                            continue
+
+                        if p2flag == True:
+                            p1flag = False
+                        else:
+                            p1flag = True
+                else:
+                    if relay1Disconnected == True:
+                        player_id = 1
+                    else:
+                        continue
+
+                x = {
+                    "player_id": player_id,
+                    "action": "gun",
+                    "isHit": True,
+                    "game_state": self.game_state.get_dict()
+                }
+                engine_to_eval_queue.put(json.dumps(x))
+
+                # NOTE: THIS IS BLOCKING because we need verification from eval server, and we want to avoid desync
+                eval_server_game_state = json.loads(eval_to_engine_queue.get()) 
+                
+                # overwrite our game state with the eval server's if ours is wrong
+                if (eval_server_game_state != self.game_state.get_dict()): 
+                    print("WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
+                    self.game_state.overwrite(eval_server_game_state)
+                
                 draw_queue.put(json.dumps(x))
                     
 
@@ -387,6 +517,10 @@ while True:
 
 if sys.argv[1] == "1":
     debug = True
+
+if sys.argv[2] == "1":
+    noDupes = True
+
 
 secret_key = bytes(str('1111111111111111'), encoding="utf8")  # Convert password to bytes
 

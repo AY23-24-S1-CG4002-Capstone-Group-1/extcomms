@@ -1,5 +1,3 @@
-from collections import namedtuple
-
 class Player:
 
     def __init__(self):
@@ -57,6 +55,8 @@ class Player:
             self.num_bullets -= 1
             if isHit:
                 defender.damage(self.hp_bullet)
+                return True
+            return False
         else:
             pass
 
@@ -66,23 +66,27 @@ class Player:
             self.num_grenades -= 1
             if isHit:
                 defender.damage(self.hp_grenade)
+                return True
+            return False
         else:
-            pass
+            return False
 
 
     def shield(self):
         if self.num_shield > 0 and self.hp_shield == 0:
             self.hp_shield = self.max_shield_health
             self.num_shield -= 1
+            return True
         else:
-            pass
+            return False
 
 
     def reload(self):
         if self.num_bullets > 0:
-            pass
+            return False
         else:
             self.num_bullets = self.max_bullets
+            return True
 
 
     def generic_action(self, defender, isHit):
@@ -114,6 +118,8 @@ class GameState:
         action = msg["action"]
         isHit = msg["isHit"]
 
+        valid = True #whether the action is valid for gun/grenade/shield/reload
+
         if player_id == "1":
             attacker = self.p1
             defender = self.p2
@@ -122,16 +128,16 @@ class GameState:
             defender = self.p1
 
         if action == "gun":
-            attacker.shoot(defender, isHit)
+            valid = attacker.shoot(defender, isHit)
                 
         elif action == "grenade":
-            attacker.grenade(defender, isHit)
+            valid = attacker.grenade(defender, isHit)
 
         elif action == "shield":
-            attacker.shield()
+            valid = attacker.shield()
 
         elif action == "reload":
-            attacker.reload()
+            valid = attacker.reload()
 
         elif action in {"web", "portal", "punch", "hammer", "spear"}:
             attacker.generic_action(defender, isHit)
@@ -143,6 +149,8 @@ class GameState:
         else:
             # invalid
             pass
+
+        return valid
 
 
     def overwrite(self, eval_server_game_state):
