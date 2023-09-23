@@ -8,6 +8,7 @@ public class HitDetection : MonoBehaviour
     public MqttPublisher mqttPublisher;
     public MqttReceiver mqttReceiver;
     public CustomAREffects care;
+    public ReloadEffectController reloadEffectController;
     public GrenadeController grenadeController;
     public ShieldController shieldController;
     public ScoreboardController scoreboardController;
@@ -111,7 +112,11 @@ public class HitDetection : MonoBehaviour
                         care.OnPlayerPortalButtonClicked();
                         break;
 
-                    default:
+                    case "reload":
+                        reloadEffectController.PlayReloadEffect();
+                        break;
+
+                    default: // none
                         break;
                 }
             } else {
@@ -140,15 +145,13 @@ public class HitDetection : MonoBehaviour
                         care.OnOpponentPortalButtonClicked();
                         break;
 
-                    default:
+                    default: // none
                         break;
                 }
             }
         }
         
         // UPDATE UI
-        Debug.Log(x.action);
-        Debug.Log(x.game_state);
         GameState game_state = JsonUtility.FromJson<GameState>(JsonUtility.ToJson(x.game_state));
         Player p1 = JsonUtility.FromJson<Player>(JsonUtility.ToJson(game_state.p1));
         Player p2 = JsonUtility.FromJson<Player>(JsonUtility.ToJson(game_state.p2)); // TODO: CHANGE THIS
@@ -164,8 +167,7 @@ public class HitDetection : MonoBehaviour
 
     private IEnumerator PublishMessage(string publishMsg, float seconds) {
         yield return new WaitForSeconds(seconds);
-        mqttPublisher.Publish(publishMsg);
-        // Debug.Log("Sent result:" + publishMsg);     
+        mqttPublisher.Publish(publishMsg);    
     }
 
 }

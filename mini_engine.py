@@ -45,12 +45,16 @@ class GameEngine:
                 # Get data from ext comms
                 y = q.get()
                 # ASSUME THAT EVAL_SERVER REPLIES HERE FROM EXT COMMS
-                self.game_state.update(y)
+                valid = self.game_state.update(y)
                 print("received:" + json.dumps(y))
+                if (valid): # only draw valid actions
+                    action = y["action"]
+                else:
+                    action = "none"
                 x = {
                     "type": "UPDATE",
                     "player_id": y["player_id"],
-                    "action": y["action"],
+                    "action": action,
                     "isHit": y["isHit"],
                     "game_state": self.game_state.get_dict()
                 }
