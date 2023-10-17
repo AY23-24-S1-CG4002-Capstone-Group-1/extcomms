@@ -171,6 +171,15 @@ class Player:
             break
 
     def reduce_health(self, hp_reduction):
+        # use the shield to protect the player
+        if self.hp_shield > 0:
+            new_hp_shield  = max (0, self.hp_shield-hp_reduction)
+            # how much should we reduce the HP by?
+            hp_reduction   = max (0, hp_reduction-self.hp_shield)
+            # update the shield HP
+            self.hp_shield = new_hp_shield
+
+        # reduce the player HP
         self.hp = max(0, self.hp - hp_reduction)
         if self.hp == 0:
             # if we die, we spawn immediately

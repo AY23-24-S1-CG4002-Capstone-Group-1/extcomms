@@ -20,6 +20,7 @@ class GameEngine:
         client.on_connect = self.on_connect
         # client.username_pw_set(username, password)
         client.connect('broker.emqx.io', 1883)
+        # client.connect('116.15.202.85', 1883)
         return client
 
     def on_message(self, client, userdata, message):

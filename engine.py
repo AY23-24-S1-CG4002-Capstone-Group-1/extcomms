@@ -55,19 +55,17 @@ class Player:
             self.num_bullets -= 1
             if isHit:
                 defender.damage(self.hp_bullet)
-                return True
-            return False
+            return True
         else:
-            pass
+            return False
 
 
     def grenade(self, defender, isHit):
         if self.num_grenades > 0:
-            self.num_grenades -= 1
-            if isHit:
+            self.num_grenades -= 1   
+            if isHit: 
                 defender.damage(self.hp_grenade)
-                return True
-            return False
+            return True
         else:
             return False
 
@@ -94,6 +92,7 @@ class Player:
             defender.damage(self.hp_bullet)
         else:
             pass
+        return True
 
 
 class GameState:
@@ -112,13 +111,13 @@ class GameState:
         return str(self.get_dict())
     
 
+    # returns false for actions that should not be drawn eg shooting a gun that is empty, reloading a gun that is not empty, throwing a grenade with no ammo
+    # note that visualiser itself does not show misses as well
     def update(self, msg):
 
         player_id = msg["player_id"]
         action = msg["action"]
         isHit = msg["isHit"]
-
-        valid = True #whether the action is valid for gun/grenade/shield/reload
 
         if player_id == "1":
             attacker = self.p1
@@ -128,29 +127,27 @@ class GameState:
             defender = self.p1
 
         if action == "gun":
-            valid = attacker.shoot(defender, isHit)
+            return attacker.shoot(defender, isHit)
                 
         elif action == "grenade":
-            valid = attacker.grenade(defender, isHit)
+            return attacker.grenade(defender, isHit)
 
         elif action == "shield":
-            valid = attacker.shield()
+            return attacker.shield()
 
         elif action == "reload":
-            valid = attacker.reload()
+            return attacker.reload()
 
         elif action in {"web", "portal", "punch", "hammer", "spear"}:
-            attacker.generic_action(defender, isHit)
+            return attacker.generic_action(defender, isHit)
         
-        elif action == "logout":
+        elif action in {"logout", "logoutquery", "logoutcancel"}:
             # logout
-            pass
+            return True
 
         else:
             # invalid
-            pass
-
-        return valid
+            return False
 
 
     def overwrite(self, eval_server_game_state):
