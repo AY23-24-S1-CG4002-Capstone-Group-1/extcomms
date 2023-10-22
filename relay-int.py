@@ -12,8 +12,20 @@ relay_queue = Queue()
 mqtt_queue = Queue()
 
 
-class RelayClient:
+'''
+Mock relay client that simulates send data. Commands:
+action: Sends 32 packets to generate random action
+drop:  Sends 26 packets. Should be discarded by ultra96
+double: Sends 60 packets. Random action generated, second discarded
+gun: Fires gun
+vest: Fires vest
+both: Fires both
 
+Also has a mqtt subscriber that will print the updated game state from the ultra96.
+'''
+
+
+class RelayClient:
     
     def __init__(self, sn):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -42,19 +54,19 @@ class RelayClient:
                         + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "}"
                         await self.send_message(msg)
                 if command == "drop":
-                    for i in range(28):
+                    for i in range(26):
                         msg = "{" + str(randint(0, 256)) + ","  + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) \
                         + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "}"
                         await self.send_message(msg)
-                if command == "over":
+                if command == "double":
                     for i in range(60):
                         msg = "{" + str(randint(0, 256)) + ","  + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) \
                         + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "}"
                         await self.send_message(msg)
-                if command == "hit":
+                if command == "both":
                     await self.send_message("KANA SHOT")
                     await self.send_message("SHOTS FIRED")
-                if command == "miss":
+                if command == "gun":
                     await self.send_message("SHOTS FIRED")
                 if command == "vest":
                     await self.send_message("KANA SHOT")
@@ -98,18 +110,17 @@ class MQTTClient:
         mqttclient.subscribe("lasertag/vizgamestate")
         mqttclient.on_message = self.on_message
 
-        while True:
-            if not mqtt_queue.empty():
-                msg = mqtt_queue.get()
-                if msg['type'] == "UPDATE":
-                    if self.sn == 1:
-                        hp = msg['game_state']['p1']['hp']
-                        bullets = msg['game_state']['p1']['bullets']
-                    else:
-                        hp = msg['game_state']['p2']['hp']
-                        bullets = msg['game_state']['p2']['bullets']
-                
-                    print("hp: " + str(hp) + "bullets: " + str(bullets))
+        if not mqtt_queue.empty():
+            msg = mqtt_queue.get()
+            if msg['type'] == "UPDATE":
+                if self.sn == 1:
+                    hp = msg['game_state']['p1']['hp']
+                    bullets = msg['game_state']['p1']['bullets']
+                else:
+                    hp = msg['game_state']['p2']['hp']
+                    bullets = msg['game_state']['p2']['bullets']
+            
+                print("hp: " + str(hp) + "bullets: " + str(bullets))
 
 
 sn = input("Enter player number:")

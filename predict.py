@@ -57,7 +57,7 @@ def pre_process(reading, end_flag):
     
     #standardise
     data = np.array(data).reshape(14,30)
-    count = 0;
+    count = 0
     if end_flag == 1:
         for i in range(30): 
             for j in range(14): 
@@ -71,14 +71,6 @@ def pre_process(reading, end_flag):
     return data
 
 def predict_action(readings, end_flag, ol):
-    '''
-    if end_flag:
-        file_name = "end.bit"
-    else: 
-        file_name = "action.bit"
-    ol = Overlay(file_name)
-    '''
-
     ol.ip_dict.keys()
     
     dma = ol.axi_dma_0
