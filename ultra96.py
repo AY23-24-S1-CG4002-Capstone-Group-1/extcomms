@@ -1,4 +1,4 @@
-# params: debug, onePlayerMode, noDupes (2p mode any player cannot go twice before the other), freePlay (no eval server)
+# params: debug, noDupes (2p mode any player cannot go twice before the other), freePlay (no eval server)
 
 import sys
 import socket
@@ -17,6 +17,7 @@ from Crypto.Util.Padding import unpad, pad
 from multiprocessing import Process, Queue
 from paho.mqtt import client as mqttclient
 
+from pynq import Overlay
 
 engine_to_eval_queue = Queue()
 eval_to_engine_queue = Queue()
@@ -28,7 +29,6 @@ relay_mlai_queues = [Queue() , Queue()]
 
 debug = False
 noDupes = False
-onePlayerMode = False
 freePlay = False
 p1flag = False
 p2flag = False
@@ -51,6 +51,13 @@ class EvalClientThread:
         self.timeout        = 60
         self.is_running     = True
 
+        game_state = GameState()
+        self.x = {
+            "player_id": "1",
+            "action": "none",
+            "game_state": game_state.get_dict()
+        }
+    
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.ip_addr, self.port))
         # Login
@@ -378,7 +385,8 @@ class GunLogicThread:
 # For now it just forwards data to the visualizer via MQTT.
 class ClassificationThread:
 
-    def __init__(self, sn):
+    def __init__(self, sn, ol):
+        self.ol = ol
         self.sn = sn
 
     def connect_mqtt(self):
@@ -403,8 +411,8 @@ class ClassificationThread:
         mqttclient = self.connect_mqtt()
         mqttclient.loop_start()
 
-        actions = ["portal", "web", "shield", "hammer", "grenade", "spear", "reload", "punch",  'logoutquery', 'none']
-        logoutactions = ["logout", "logoutcancel"]
+        actions = ["portal", "web", "shield", "hammer", "grenade", "spear", "reload", "punch",  'logout', 'none']
+        logoutactions = ["logoutcancel", "logoutcancel", "logoutcancel"]
         buffer = [0]*(30*8)
         pointer = 0
         lastaction = perf_counter()
@@ -430,9 +438,9 @@ class ClassificationThread:
                             print("received " + str(pointer + 1) + "(full) packets, action to be identified")
 
                         if endFlag:
-                            action = logoutactions[predict_action(buffer, endFlag)]
+                            action = logoutactions[predict_action(buffer, endFlag, self.ol)]
                         else:
-                            action = actions[predict_action(buffer, endFlag)]
+                            action = actions[predict_action(buffer, endFlag, self.ol)]
                         toPublish = True
                         pointer = 0
                         timeout = None
@@ -446,9 +454,9 @@ class ClassificationThread:
                         print("received " + str(pointer + 1) + " packets, action to be identified")
 
                     if endFlag:
-                        action = logoutactions[predict_action(buffer, endFlag)]
+                        action = logoutactions[predict_action(buffer, endFlag, self.ol)]
                     else:
-                        action = actions[predict_action(buffer, endFlag)]
+                        action = actions[predict_action(buffer, endFlag, self.ol)]
                     toPublish = True
                     pointer = 0
                 # if too many packets are dropped we just discard it to be safe
@@ -464,8 +472,10 @@ class ClassificationThread:
                 if perf_counter() > lastaction + 3.0:
                     if endFlag:
                         endFlag = 0
-                    if action == "logoutquery":
+                        self.ol = Overlay("action.bit")
+                    if action == "logout":
                         endFlag = 1
+                        self.ol = Overlay("end.bit")
 
                     x = {
                         "type": "QUERY",
@@ -480,7 +490,8 @@ class ClassificationThread:
                 else:
                     if debug:
                         print(f"CLASSIFICATION{self.sn}: WARNING! Double action discarded")
-
+                
+                buffer = [0]*(30*8)
                 toPublish = False
 
 
@@ -514,7 +525,6 @@ class GameEngine:
 
     def run(self):
         global debug
-        global onePlayerMode
 
         global p1flag
         global p2flag
@@ -597,12 +607,9 @@ if sys.argv[1] == "1":
     debug = True
 
 if sys.argv[2] == "1":
-    onePlayerMode = True
-
-if sys.argv[3] == "1":
     noDupes = True
 
-if sys.argv[4] == "1":
+if sys.argv[3] == "1":
     freePlay = True
 
 
@@ -633,10 +640,13 @@ if not freePlay:
     evalclient = Process(target=eval_client.run)
     evalclient.start()
 
+
+ol = Overlay("action.bit")
+
 relaycomms_client1 = RelayCommsThread(1)
 relaycomms_client2 = RelayCommsThread(2)
-classification_thread1 = ClassificationThread(1)
-classification_thread2 = ClassificationThread(2)
+classification_thread1 = ClassificationThread(1, ol)
+classification_thread2 = ClassificationThread(2, ol)
 gun_thread = GunLogicThread()
 game_engine = GameEngine()
 

@@ -108,8 +108,9 @@ function startConnection() {
     //disable all the buttons
     disableButton('button_next')
     
-    // const server_address = "ws://192.168.56.1:8001/"
-    const server_address = "ws://192.168.137.1:8001"
+    // const server_address = "ws://192.168.56.1:8001"
+    // const server_address = "ws://192.168.137.1:8001"
+    const server_address = "ws://127.0.0.1:8001"
     // const server_address = "ws://172.25.76.133:8001/"
     // const server_address = "ws://cg4002-i.comp.nus.edu.sg:8001/"
     if (!("WebSocket" in window)) {
