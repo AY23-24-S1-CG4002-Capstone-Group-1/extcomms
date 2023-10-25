@@ -1,9 +1,4 @@
-'''
-Enter 3 args: 
-debug   : Prints debug messages
-noDupes : 2p mode any player cannot go twice before the other
-freePlay: No eval server
-'''
+# params: debug, noDupes (2p mode any player cannot go twice before the other), freePlay (no eval server)
 
 import sys
 import socket
@@ -27,7 +22,7 @@ from pynq import Overlay
 engine_to_eval_queue = Queue()
 eval_to_engine_queue = Queue()
 
-gun_process_queue = Queue()
+gun_thread_queue = Queue()
 to_engine_queue = Queue()
 
 relay_mlai_queues = [Queue() , Queue()]
@@ -41,14 +36,13 @@ p2flag = False
 BROKER = '54.244.173.190'
 # BROKER = '116.15.202.187'
 
+DOUBLE_ACTION_WINDOW = 2.0
 GUN_WINDOW = 1.0
 SENSOR_WINDOW = 0.2
-COOLDOWN = 2.0
 
-'''
-This process reads from the engine_to_eval_queue and sends all valid actions to the eval server.
-'''
-class EvalClientProcess:
+
+# This thread reads from the engine_to_eval_queue and sends all valid actions to the eval server.
+class EvalClientThread:
     
     def __init__(self, ip_addr, port, secret_key):
         self.ip_addr        = ip_addr
@@ -186,10 +180,8 @@ class EvalClientProcess:
             pass
 
 
-'''
-This process receives data from the relay node via TCP and sends it to the gun/classification process.
-'''
-class RelayCommsProcess:
+# This thread receives data from the relay node via TCP and sends it to the gun/classification thread
+class RelayCommsThread:
     
     def __init__(self, sn):
         self.timeout = 45
@@ -268,7 +260,7 @@ class RelayCommsProcess:
                     elif text_received == 'KANA SHOT' or text_received == 'SHOTS FIRED':
                         if debug:
                             print("relay received: " + text_received + " , put on gun queue")
-                        gun_process_queue.put(str(self.sn) + text_received)
+                        gun_thread_queue.put(str(self.sn) + text_received)
                     else:
                         if debug:
                             print("relay received: " + text_received + " , put on mlai queue")
@@ -287,19 +279,7 @@ class RelayCommsProcess:
             pass
         
 
-'''
-This process reads from the gun queue. By default it has no timeout.
-When it receives a vest fired, it checks the fire time of the opposing gun.
-    If it was within the GUN_WINDOW, then it is counted as a hit.
-    If it was not, then updates the hit time of the vest. 
-When it receives a gun fired, it checks the hit time of the opposing vest. 
-    If it was within the GUN_WINDOW, then it is counted as a hit.
-    If it was not, then it updates the fire time of this gun. The queue timeout is then set as the GUN_WINDOW. *(Note below)
-        If it times out, then it is a miss. (Note that all other cases do reset the timeout to none)
-
-*(Note) If another gun's GUN_WINDOW is still active then the timeout is set to its timeout instead.
-'''
-class GunLogicProcess:
+class GunLogicThread:
 
     def run(self):
         global debug
@@ -314,7 +294,7 @@ class GunLogicProcess:
 
         while True: 
             try:            
-                msg = gun_process_queue.get(timeout = timeout)
+                msg = gun_thread_queue.get(timeout = timeout)
                 currtime = perf_counter()
 
                 if msg[1:] == 'KANA SHOT':
@@ -354,7 +334,6 @@ class GunLogicProcess:
                                 "isHit": True
                             }
                             to_engine_queue.put(x)
-                            p1gunflag = False
                             timeout = None
                         else:
                             p1gun = currtime
@@ -372,7 +351,6 @@ class GunLogicProcess:
                                 "isHit": True
                             }
                             to_engine_queue.put(x)
-                            p2gunflag = False
                             timeout = None
                         else:
                             p2gun = currtime
@@ -406,19 +384,9 @@ class GunLogicProcess:
                 timeout = None
 
 
-'''
-This process will read from the relay_mlai_queue and identify the actions from sensor data, then publish it to the visualiser via MQTT. 
-Default timeout is none but when it receives packets it is set to the SENSOR_WINDOW. After an action has been identified the timeout is reset back to none.
-
-If it receives 30 packets it proceeds.
-If timeout:
-    If it receives more than 28 packets it proceeds.
-    Otherwise it discards it.
-
-There is a safeguard to block any action published within COOLDOWN of each other from the same player since it is likely that the onset detection has fired twice
-by accident.
-'''
-class ClassificationProcess:
+# This thread will read from the relay_mlai_queue and identify the actions from sensor data, then publish it to the visualiser via MQTT. 
+# For now it just forwards data to the visualizer via MQTT.
+class ClassificationThread:
 
     def __init__(self, sn, ol):
         self.ol = ol
@@ -447,11 +415,9 @@ class ClassificationProcess:
         mqttclient.loop_start()
 
         actions = ["portal", "web", "shield", "hammer", "grenade", "spear", "reload", "punch",  'logout', 'none']
-        logoutactions = ["logoutcancel", "logoutcancel", "logoutcancel"]
         buffer = [0]*(30*8)
         pointer = 0
         lastaction = perf_counter()
-        endFlag = 0
         timeout = None
         toPublish = False
 
@@ -472,10 +438,7 @@ class ClassificationProcess:
                         if debug:
                             print("received " + str(pointer + 1) + "(full) packets, action to be identified")
 
-                        if endFlag:
-                            action = logoutactions[predict_action(buffer, endFlag, self.ol)]
-                        else:
-                            action = actions[predict_action(buffer, endFlag, self.ol)]
+                        action = actions[predict_action(buffer, 0, self.ol)]
                         toPublish = True
                         pointer = 0
                         timeout = None
@@ -488,30 +451,21 @@ class ClassificationProcess:
                     if debug:
                         print("received " + str(pointer + 1) + " packets, action to be identified")
 
-                    if endFlag:
-                        action = logoutactions[predict_action(buffer, endFlag, self.ol)]
-                    else:
-                        action = actions[predict_action(buffer, endFlag, self.ol)]
+                    action = actions[predict_action(buffer, 0, self.ol)]
                     toPublish = True
                     pointer = 0
                 # if too many packets are dropped we just discard it to be safe
                 else:
                     if debug:
                         print("received " + str(pointer + 1) + " packets, data discarded")
+
                     toPublish = False
                     pointer = 0
                 timeout = None
 
             if toPublish:
-                # funky measure to stop actions that occur within the define interval because they are likely to be misfires
-                if perf_counter() > lastaction + COOLDOWN:
-                    if endFlag:
-                        endFlag = 0
-                        self.ol = Overlay("action.bit")
-                    if action == "logout":
-                        endFlag = 1
-                        self.ol = Overlay("end.bit")
-
+                # funky measure to stop actions that occur within 3s because they are likely to be misfires
+                if perf_counter() > lastaction + DOUBLE_ACTION_WINDOW:
                     x = {
                         "type": "QUERY",
                         "player_id": self.sn,
@@ -530,10 +484,8 @@ class ClassificationProcess:
                 toPublish = False
 
 
-'''
-This is the game engine. It receives hit confirmations via MQTT and updates the game state accordingly. If it is a hit (valid action) it passes the
-action and game state to the eval_client for verification. It then puts the updated game state on the draw queue.
-'''
+# This is the game engine. It receives hit confirmations via MQTT and updates the game state accordingly. If it is a hit (valid action) it passes the
+# action and game state to the eval_client for verification. It then puts the updated game state on the draw queue.
 class GameEngine:
 
     def __init__(self):
@@ -572,7 +524,7 @@ class GameEngine:
         mqttclient.subscribe("lasertag/vizhit")
         mqttclient.on_message = self.on_message
 
-        custom_actions = ["none", "logoutquery", "logoutcancel"]
+        custom_actions = ["none"]
 
         while True:
             msg = to_engine_queue.get()
@@ -649,7 +601,6 @@ if sys.argv[2] == "1":
 if sys.argv[3] == "1":
     freePlay = True
 
-
 if not freePlay:
     # actual server
     # host = "172.25.76.133"
@@ -673,18 +624,17 @@ if not freePlay:
             print("Connection refused.")
             continue
 
-    eval_client = EvalClientProcess(host, port, secret_key)
+    eval_client = EvalClientThread(host, port, secret_key)
     evalclient = Process(target=eval_client.run)
     evalclient.start()
 
-
 ol = Overlay("action.bit")
 
-relaycomms_client1 = RelayCommsProcess(1)
-relaycomms_client2 = RelayCommsProcess(2)
-classification_thread1 = ClassificationProcess(1, ol)
-classification_thread2 = ClassificationProcess(2, ol)
-gun_thread = GunLogicProcess()
+relaycomms_client1 = RelayCommsThread(1)
+relaycomms_client2 = RelayCommsThread(2)
+classification_thread1 = ClassificationThread(1, ol)
+classification_thread2 = ClassificationThread(2, ol)
+gun_thread = GunLogicThread()
 game_engine = GameEngine()
 
 relay1 = Process(target=relaycomms_client1.run)
