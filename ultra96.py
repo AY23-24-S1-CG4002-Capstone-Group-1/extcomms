@@ -323,10 +323,16 @@ class GunLogicThread:
                             }
                             to_engine_queue.put(x)
                             p2gunflag = False
-                            timeout = None
+                            if p1gunflag:
+                                timeout = p1gun + GUN_WINDOW - currtime
+                            else:
+                                timeout = None
                         else:
                             p1vest = currtime
-                            timeout = None
+                            if p1gunflag:
+                                timeout = p1gun + GUN_WINDOW - currtime
+                            else:
+                                timeout = None
                     else:
                         if currtime < p1gun + GUN_WINDOW:
                             x = {
@@ -336,10 +342,16 @@ class GunLogicThread:
                             }
                             to_engine_queue.put(x)
                             p1gunflag = False
-                            timeout = None
+                            if p2gunflag:
+                                timeout = p2gun + GUN_WINDOW - currtime
+                            else:
+                                timeout = None
                         else:
                             p2vest = currtime
-                            timeout = None
+                            if p2gunflag:
+                                timeout = p2gun + GUN_WINDOW - currtime
+                            else:
+                                timeout = None
 
                 elif msg[1:] == SHOOT_MESSAGE:
                     if msg[0] == '1':
@@ -350,7 +362,10 @@ class GunLogicThread:
                                 "isHit": True
                             }
                             to_engine_queue.put(x)
-                            timeout = None
+                            if p2gunflag:
+                                timeout = p2gun + GUN_WINDOW - currtime
+                            else:
+                                timeout = None
                         else:
                             p1gun = currtime
                             p1gunflag = True
@@ -367,7 +382,10 @@ class GunLogicThread:
                                 "isHit": True
                             }
                             to_engine_queue.put(x)
-                            timeout = None
+                            if p1gunflag:
+                                timeout = p1gun + GUN_WINDOW - currtime
+                            else:
+                                timeout = None
                         else:
                             p2gun = currtime
                             p2gunflag = True
