@@ -1,9 +1,4 @@
-'''
-Enter 3 args: 
-debug   : Prints debug messages
-noDupes : 2p mode any player cannot go twice before the other
-freePlay: No eval server
-'''
+# params: debug, noDupes (2p mode any player cannot go twice before the other), freePlay (no eval server)
 
 import sys
 import socket
@@ -27,7 +22,7 @@ from pynq import Overlay
 engine_to_eval_queue = Queue()
 eval_to_engine_queue = Queue()
 
-gun_process_queue = Queue()
+gun_thread_queue = Queue()
 to_engine_queue = Queue()
 
 relay_mlai_queues = [Queue() , Queue()]
@@ -37,40 +32,24 @@ noDupes = False
 freePlay = False
 # BROKER = 'broker.emqx.io'
 BROKER = '54.244.173.190'
+# BROKER = '116.15.202.187'
 
 DOUBLE_ACTION_WINDOW = 3.0
 GUN_WINDOW = 0.6
 SENSOR_WINDOW = 0.5
-HIT_MESSAGE = "KANA SHOT"
-SHOOT_MESSAGE = "SHOTS FIRED"
 
 
-def printError(msg): print("\033[41m\033[37m{}\033[00m" .format(msg))
-def printInfo(msg): print("\033[42m\033[92m{}\033[00m" .format(msg))
-def printP1(msg): print("\033[93m{}\033[00m" .format(msg))
-def printP1Info(msg): print("\033[93m\033[42m{}\033[00m" .format(msg))
-def printP1Error(msg): print("\033[93m\033[41m{}\033[00m" .format(msg))
-def printP2(msg): print("\033[96m{}\033[00m" .format(msg))
-def printP2Info(msg): print("\033[96m\033[42m{}\033[00m" .format(msg))
-def printP2Error(msg): print("\033[96m\033[41m{}\033[00m" .format(msg))
-def printEngineP1(msg): print("\033[47m\033[30m[ENGINE]\033[00m \033[93m{}\033[00m" .format(msg))
-def printEngineP2(msg): print("\033[47m\033[30m[ENGINE]\033[00m \033[96m{}\033[00m" .format(msg))
-def printEngineError(msg): print("\033[47m\033[30m[ENGINE]\033[00m \033[41m\033[37m{}\033[00m" .format(msg))
-
-
-'''
-This process reads from the engine_to_eval_queue and sends all valid actions to the eval server.
-'''
-class EvalClientProcess:
+# This thread reads from the engine_to_eval_queue and sends all valid actions to the eval server.
+class EvalClientThread:
     
     def __init__(self, ip_addr, port, secret_key):
         self.ip_addr        = ip_addr
         self.port           = port
         self.secret_key     = secret_key
   
-        self.timeout        = None
+        self.timeout        = 60
         self.is_running     = True
-
+ 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.ip_addr, self.port))
         # Login
@@ -131,8 +110,9 @@ class EvalClientProcess:
         else:
             timeout = -1
 
+        global debug
         if debug:
-            print("[EVALUATION CLIENT] Received: " + msg)
+            print("Evalclient received: " + msg)
 
         return success, timeout, msg
 
@@ -158,6 +138,8 @@ class EvalClientProcess:
 
 
     async def main(self):
+        global debug
+
         await self.send_message("hello") 
 
         while True:
@@ -170,7 +152,7 @@ class EvalClientProcess:
             }
 
             if debug:
-                print("[EVALUATION CLIENT] Sending JSON to eval server:" + json.dumps(x))
+                print("sending json to eval server:" + json.dumps(x))
 
             await self.send_message(json.dumps(x))
 
@@ -179,7 +161,8 @@ class EvalClientProcess:
             if success:
                 eval_to_engine_queue.put(text_received)
             else:
-                printError("[EVALUATION CLIENT] ERROR! NO REPLY RECEIVED FROM EVAL_SERVER!")
+                eval_to_engine_queue.put("TIMEOUT")
+                print("WARNING! NO REPLY RECEIVED FROM EVAL_SERVER")
 
 
     def run(self):
@@ -189,15 +172,11 @@ class EvalClientProcess:
             pass
 
 
-
-
-'''
-This process receives data from the relay node via TCP and sends it to the gun/classification process.
-'''
-class RelayCommsProcess:
+# This thread receives data from the relay node via TCP and sends it to the gun/classification thread
+class RelayCommsThread:
     
     def __init__(self, sn):
-        self.timeout = None
+        self.timeout = 45
         self.is_running = True
         self.sn = sn
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -239,9 +218,9 @@ class RelayCommsProcess:
                     success = True
                     break
             except ConnectionResetError:
-                printError("[RELAY " + str(self.sn) + "] disconnected")
+                print("relay " + str(self.sn) + " disconnected")
                 self.conn, self.addr = await loop.sock_accept(self.sock)
-                printInfo("[RELAY " + str(self.sn) + "] connected")
+                print("relay " + str(self.sn) + " connected")
             except asyncio.TimeoutError:
                 timeout = -1
         else:
@@ -251,6 +230,8 @@ class RelayCommsProcess:
 
 
     async def main(self):
+        global debug
+
         while True:
             if not self.is_running:
                 return
@@ -259,21 +240,28 @@ class RelayCommsProcess:
 
             loop = asyncio.get_event_loop()
             self.conn, self.addr = await loop.sock_accept(self.sock)
-            printInfo("[RELAY " + str(self.sn) + "] CONNECTED")
+            print("relay " + str(self.sn) + " connected")
             while True:
-                success, timeout, text_received = await self.receive_message(self.timeout)
+                try:
+                    task = self.receive_message(self.timeout)
+                    success, timeout, text_received = await asyncio.wait_for(task, timeout=1500)
 
-                if text_received == '':
-                    # invalid data
-                    pass
-                elif text_received == HIT_MESSAGE or text_received == SHOOT_MESSAGE:
-                    # if debug:
-                    #     print("[RELAY " + str(self.sn) + "] Received: " + text_received + " , put on gun queue")
-                    gun_process_queue.put(str(self.sn) + text_received)
-                else:
-                    # if debug:
-                    #     print("[RELAY " + str(self.sn) + "] Received: " + text_received + " , put on mlai queue")
-                    relay_mlai_queues[self.sn - 1].put(text_received)
+                    if text_received == '':
+                        # invalid data
+                        pass
+                    elif text_received == 'KANA SHOT' or text_received == 'SHOTS FIRED':
+                        if debug:
+                            print("relay received: " + text_received + " , put on gun queue")
+                        gun_thread_queue.put(str(self.sn) + text_received)
+                    else:
+                        if debug:
+                            print("relay received: " + text_received + " , put on mlai queue")
+                        relay_mlai_queues[self.sn - 1].put(text_received)
+
+                except asyncio.TimeoutError:
+                    print("relay " + str(self.sn) + " timeout")
+                    self.conn, self.addr = await loop.sock_accept(self.sock)
+                    print("relay " + str(self.sn) + " connected")
 
 
     def run(self):
@@ -283,23 +271,11 @@ class RelayCommsProcess:
             pass
         
 
-
-
-'''
-This process reads from the gun queue. By default it has no timeout.
-When it receives a vest fired, it checks the fire time of the opposing gun.
-    If it was within the GUN_WINDOW, then it is counted as a hit.
-    If it was not, then updates the hit time of the vest. 
-When it receives a gun fired, it checks the hit time of the opposing vest. 
-    If it was within the GUN_WINDOW, then it is counted as a hit.
-    If it was not, then it updates the fire time of this gun. The queue timeout is then set as the GUN_WINDOW. *(Note below)
-        If it times out, then it is a miss. It then checks if there is pending timeout for the other gun and sets the timeout
-        accordingly. If there isn't, then the timeout is set to None once more.
-*(Note) If another gun's GUN_WINDOW is still active then the timeout is set to its timeout instead.
-'''
 class GunLogicThread:
 
     def run(self):
+        global debug
+
         p1gun = 0
         p2gun = 0
         p1vest = 0
@@ -310,10 +286,10 @@ class GunLogicThread:
 
         while True: 
             try:            
-                msg = gun_process_queue.get(timeout = timeout)
+                msg = gun_thread_queue.get(timeout = timeout)
                 currtime = perf_counter()
 
-                if msg[1:] == HIT_MESSAGE:
+                if msg[1:] == 'KANA SHOT':
                     if msg[0] == '1':
                         if currtime < p2gun + GUN_WINDOW:
                             x = {
@@ -341,7 +317,7 @@ class GunLogicThread:
                             p2vest = currtime
                             timeout = None
 
-                elif msg[1:] == SHOOT_MESSAGE:
+                elif msg[1:] == 'SHOTS FIRED':
                     if msg[0] == '1':
                         if currtime < p2vest + GUN_WINDOW:
                             x = {
@@ -387,11 +363,6 @@ class GunLogicThread:
                     }
                     to_engine_queue.put(x)
                     p1gunflag = False
-                    # we check if there is still a pending timeout for the other gun
-                    if p2gunflag:
-                        timeout = p2gun + GUN_WINDOW - currtime
-                    else:
-                        timeout = None
 
                 if p2gunflag and currtime > p2gun + GUN_WINDOW:
                     x = {
@@ -400,36 +371,24 @@ class GunLogicThread:
                         "isHit": False
                     }
                     to_engine_queue.put(x)
-                    # same as above
                     p2gunflag = False
-                    if p1gunflag:
-                        timeout = p1gun + GUN_WINDOW - currtime
-                    else:
-                        timeout = None
+
+                timeout = None
 
 
-
-
-'''
-This process will read from the relay_mlai_queue and identify the actions from sensor data, then publish it to the visualiser via MQTT. 
-Default timeout is none but when it receives packets it is set to the SENSOR_WINDOW. After an action has been identified the timeout is reset back to none.
-If it receives 30 packets it proceeds.
-If timeout:
-    If it receives more than 28 packets it proceeds.
-    Otherwise it discards it.
-There is a safeguard to block any action published within COOLDOWN of each other from the same player since it is likely that the onset detection has fired twice
-by accident.
-'''
-class ClassificationProcess:
+# This thread will read from the relay_mlai_queue and identify the actions from sensor data, then publish it to the visualiser via MQTT. 
+# For now it just forwards data to the visualizer via MQTT.
+class ClassificationThread:
 
     def __init__(self, sn, ol):
         self.ol = ol
         self.sn = sn
 
-
     def connect_mqtt(self):
+        # Set Connecting Client ID
         client = mqttclient.Client(f'lasertagb01-class-{self.sn}')
         client.on_connect = self.on_connect
+        # client.username_pw_set(username, password)
         client.connect(BROKER, 1883)
         return client
     
@@ -442,6 +401,8 @@ class ClassificationProcess:
 
             
     def run(self):
+        global debug
+
         mqttclient = self.connect_mqtt()
         mqttclient.loop_start()
 
@@ -457,10 +418,7 @@ class ClassificationProcess:
                 msg = relay_mlai_queues[self.sn - 1].get(timeout = timeout)
 
                 if debug:
-                    if self.sn == 1:
-                        printP1("[P1 CLASSIFICATION] Sensor reading get: " + msg)
-                    else:
-                        printP2("[P2 CLASSIFICATION] Sensor reading get: " + msg)
+                    print("sensor reading get: " + msg)
 
                 res = msg.strip("{}").split(",")
 
@@ -470,10 +428,7 @@ class ClassificationProcess:
                     # here we have received at least 30 packets
                     if pointer == 239:
                         if debug:
-                            if self.sn == 1:
-                                printP1("[P1 CLASSIFICATION] Received " + str(pointer + 1) + "(full) packets, action to be identified")
-                            else:
-                                printP2("[P2 CLASSIFICATION] Received " + str(pointer + 1) + "(full) packets, action to be identified")
+                            print("received " + str(pointer + 1) + "(full) packets, action to be identified")
 
                         action = actions[predict_action(buffer, 0, self.ol)]
                         toPublish = True
@@ -486,10 +441,7 @@ class ClassificationProcess:
                 # if we do not receive a packet in 200ms we assume that there has been packet drop and send it for classification.
                 if pointer > 223:
                     if debug:
-                        if self.sn == 1:
-                            printP1("[P1 CLASSIFICATION] Received " + str(pointer + 1) + " packets, action to be identified")
-                        else:
-                            printP2("[P2 CLASSIFICATION] Received " + str(pointer + 1) + " packets, action to be identified")
+                        print("received " + str(pointer + 1) + " packets, action to be identified")
 
                     action = actions[predict_action(buffer, 0, self.ol)]
                     toPublish = True
@@ -497,10 +449,7 @@ class ClassificationProcess:
                 # if too many packets are dropped we just discard it to be safe
                 else:
                     if debug:
-                        if self.sn == 1:
-                            printP1Error("[P1 CLASSIFICATION] Received " + str(pointer + 1) + " packets, data discarded")
-                        else:
-                            printP2Error("[P2 CLASSIFICATION] Received " + str(pointer + 1) + " packets, data discarded")
+                        print("received " + str(pointer + 1) + " packets, data discarded")
 
                     toPublish = False
                     pointer = 0
@@ -518,36 +467,29 @@ class ClassificationProcess:
                     lastaction = perf_counter()
 
                     if debug:
-                        if self.sn == 1:
-                            printP1Info("[P1 CLASSIFICATION] Motion data passed to viz:" + json.dumps(x))
-                        else:
-                            printP2Info("[P2 CLASSIFICATION] Motion data passed to viz:" + json.dumps(x))
+                        print(f"CLASSIFICATION{self.sn}: motion data passed to viz:" + json.dumps(x))
                 else:
                     if debug:
-                        if self.sn == 1:
-                            printP1Error("[P1 CLASSIFICATION] WARNING! Double action discarded")
-                        else:
-                            printP2Error("[P2 CLASSIFICATION] WARNING! Double action discarded")
+                        print(f"CLASSIFICATION{self.sn}: WARNING! Double action discarded")
                 
                 buffer = [0]*(30*8)
                 toPublish = False
 
 
-
-
-'''
-This is the game engine. It receives hit confirmations via MQTT and updates the game state accordingly. If it is a hit (valid action) it passes the
-action and game state to the eval_client for verification. It then puts the updated game state on the draw queue.
-'''
+# This is the game engine. It receives hit confirmations via MQTT and updates the game state accordingly. If it is a hit (valid action) it passes the
+# action and game state to the eval_client for verification. It then puts the updated game state on the draw queue.
 class GameEngine:
 
     def __init__(self):
         self.game_state = GameState()
+        self.timeout = None
 
 
     def connect_mqtt(self):
+        # Set Connecting Client ID
         client = mqttclient.Client(f'lasertagb01-engine')
         client.on_connect = self.on_connect
+        # client.username_pw_set(username, password)
         client.connect(BROKER, 1883)
         return client
 
@@ -564,6 +506,8 @@ class GameEngine:
 
 
     def run(self):
+        global debug
+
         p1flag = False
         p2flag = False
 
@@ -573,78 +517,126 @@ class GameEngine:
         mqttclient.subscribe("lasertag/vizhit")
         mqttclient.on_message = self.on_message
 
+        custom_actions = ["none"]
+
         while True:
-            msg = to_engine_queue.get()
+            try:
+                msg = to_engine_queue.get(timeout=self.timeout)
 
-            if debug:
-                if msg["player_id"] == "1":
-                    printEngineP1("Update:" + str(msg))
-                else:
-                    printEngineP2("Update:" + str(msg))
+                if debug:
+                    print("Engine update:" + str(msg))
 
-            # if we check for dupes we do not accept dupes from the same player
-            if noDupes and not msg["action"] == "none":
-                player_id = msg["player_id"]
-                if player_id == "1" and p1flag == True:
-                    continue
-                if player_id == "2" and p2flag == True:
+                if msg["action"] == "none":
                     continue
 
-                # never allow a player to send 2 consecutive actions in the same round (2 player)
-                if player_id == "1":
-                    if p2flag == True:
-                        p2flag = False
-                    else:
-                        p1flag = True
-                else:
-                    if p1flag == True:
-                        p1flag = False
-                    else:
-                        p2flag = True
+                # if we check for dupes we do not accept dupes from the same player
+                if noDupes:
+                    player_id = msg["player_id"]
+                    if player_id == "1" and p1flag == True:
+                        continue
+                    if player_id == "2" and p2flag == True:
+                        continue
 
-            # update gamestate
-            valid = self.game_state.update(msg) 
+                    # never allow a player to send 2 consecutive actions in the same round (2 player)
+                    if player_id == "1":
+                        if p2flag == True:
+                            p2flag = False
+                            self.timeout = None
+                        else:
+                            p1flag = True
+                            self.timeout = 30
+                    else:
+                        if p1flag == True:
+                            p1flag = False
+                            self.timeout = None
+                        else:
+                            p2flag = True
+                            self.timeout = 30
 
-            x = {
-                "player_id": msg["player_id"],
-                "action": msg["action"],
-                "game_state": self.game_state.get_dict()
-            }
+                # update gamestate
+                valid = self.game_state.update(msg) 
+
+                x = {
+                    "player_id": msg["player_id"],
+                    "action": msg["action"],
+                    "game_state": self.game_state.get_dict()
+                }
             
-            # we dont send our actions to eval server in freeplay, or custom actions to the eval server at all
-            if not freePlay and not msg["action"] == "none":
-                engine_to_eval_queue.put(json.dumps(x))
+                # we dont send our actions to eval server in freeplay, or custom actions to the eval server at all
+                if not freePlay and msg["action"] not in custom_actions:
+                    engine_to_eval_queue.put(json.dumps(x))
+                
+                    try:
+                        res = eval_to_engine_queue.get(timeout = 5.0)
+                    except:
+                        print("WARNING: NO RESPONSE FROM EVAL SERVER")
+                        p1flag = False
+                        p2flag = False
+                        self.timeout = None
+                        continue
 
-                # NOTE: THIS IS BLOCKING because we need verification from eval server, and we want to avoid desync
-                eval_server_game_state = json.loads(eval_to_engine_queue.get())
+                    # NOTE: THIS IS BLOCKING because we need verification from eval server, and we want to avoid desync
+                    eval_server_game_state = json.loads(res)    
 
-                # overwrite our game state with the eval server's if ours is wrong
-                if eval_server_game_state != self.game_state.get_dict(): 
-                    printEngineError(" WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
-                    self.game_state.overwrite(eval_server_game_state)
+                    # overwrite our game state with the eval server's if ours is wrong
+                    if eval_server_game_state != self.game_state.get_dict(): 
+                        print("WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
+                        self.game_state.overwrite(eval_server_game_state)
 
-            if valid: # only draw valid actions
-                action = msg["action"]
-            else:
-                action = "none"
-
-            # put updated game state on queue for drawing
-            x = {
-                "type": "UPDATE",
-                "player_id": msg["player_id"],
-                "action": action,
-                "isHit": msg["isHit"],
-                "game_state": self.game_state.get_dict()
-            }
-
-            if debug:
-                if msg["player_id"] == "1":
-                    printEngineP1("Final update forwarded to viz:" + json.dumps(x))
+                if valid: # only draw valid actions
+                    action = msg["action"]
                 else:
-                    printEngineP2("Final update forwarded to viz:" + json.dumps(x))
-                    
-            mqttclient.publish("lasertag/vizgamestate", json.dumps(x))
-                    
+                    action = "none"
+
+                # put updated game state on queue for drawing
+                x = {
+                    "type": "UPDATE",
+                    "player_id": msg["player_id"],
+                    "action": action,
+                    "isHit": msg["isHit"],
+                    "game_state": self.game_state.get_dict()
+                }
+
+                if debug:
+                    print("final update forwarded to viz:" + json.dumps(x))
+                mqttclient.publish("lasertag/vizgamestate", json.dumps(x))
+            
+            except:
+                if not freePlay:
+                    if p1flag == True:
+                        player_id = '2'
+                    else:
+                        player_id = '1'
+                    x = {
+                        "player_id": player_id,
+                        "action": 'gun',
+                        "game_state": self.game_state.get_dict()
+                    }
+                    engine_to_eval_queue.put(json.dumps(x))
+                
+                    try:
+                        res = eval_to_engine_queue.get(timeout = 5.0)
+                    except:
+                        p1flag = False
+                        p2flag = False
+                        self.timeout = None
+                        continue
+                    if debug:
+                        print(res)
+                    if res == "TIMEOUT":
+                        p1flag = False
+                        p2flag = False
+                        self.timeout = None
+                        continue
+
+                    # NOTE: THIS IS BLOCKING because we need verification from eval server, and we want to avoid desync
+                    eval_server_game_state = json.loads(res)    
+
+                    # overwrite our game state with the eval server's if ours is wrong
+                    if eval_server_game_state != self.game_state.get_dict(): 
+                        print("WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
+                        self.game_state.overwrite(eval_server_game_state)
+
 
 if sys.argv[1] == "1":
     debug = True
@@ -678,24 +670,24 @@ if not freePlay:
             print("Connection refused.")
             continue
 
-    eval_client = EvalClientProcess(host, port, secret_key)
+    eval_client = EvalClientThread(host, port, secret_key)
     evalclient = Process(target=eval_client.run)
     evalclient.start()
 
 ol = Overlay("action.bit")
 
-relaycomms_client1 = RelayCommsProcess(1)
-relaycomms_client2 = RelayCommsProcess(2)
-classification1 = ClassificationProcess(1, ol)
-classification2 = ClassificationProcess(2, ol)
-gun_logic = GunLogicThread()
+relaycomms_client1 = RelayCommsThread(1)
+relaycomms_client2 = RelayCommsThread(2)
+classification_thread1 = ClassificationThread(1, ol)
+classification_thread2 = ClassificationThread(2, ol)
+gun_thread = GunLogicThread()
 game_engine = GameEngine()
 
 relay1 = Process(target=relaycomms_client1.run)
 relay2 = Process(target=relaycomms_client2.run)
-classification1 = Process(target=classification1.run)
-classification2 = Process(target=classification2.run)
-gun = Process(target=gun_logic.run)
+classification1 = Process(target=classification_thread1.run)
+classification2 = Process(target=classification_thread2.run)
+gun = Process(target=gun_thread.run)
 engine = Process(target=game_engine.run)
 
 relay1.start()
