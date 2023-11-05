@@ -10,17 +10,18 @@ import socket
 import base64
 import json
 import asyncio
+import atexit
 
 from engine import GameState
 from predict import predict_action
 
 from time import perf_counter
-from random import randint, choice
 from Crypto import Random
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad, pad
 from multiprocessing import Process, Queue
 from paho.mqtt import client as mqttclient
+from socket import SHUT_RDWR
 
 from pynq import Overlay
 
@@ -36,7 +37,7 @@ debug = False
 noDupes = False
 freePlay = False
 # BROKER = 'broker.emqx.io'
-BROKER = '54.244.173.190'
+BROKER = '54.244.173.190' # This is broker.emqx.io but we faced some issues with DNS resolution once so it's safer to use this.
 
 DOUBLE_ACTION_WINDOW = 3.0
 GUN_WINDOW = 0.6
@@ -68,7 +69,7 @@ class EvalClientProcess:
         self.port           = port
         self.secret_key     = secret_key
   
-        self.timeout        = None
+        self.timeout        = 900000
         self.is_running     = True
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -157,6 +158,17 @@ class EvalClientProcess:
         return decrypted_message
 
 
+    def cleanup(self):
+        try:
+            if self.port is not None:
+                self.port.shutdown(SHUT_RDWR)
+                self.port.close()
+                self.port = None
+            self.sock.close()
+        except Exception as e:
+            printError("[EVALUATION CLIENT] Failed to shutdown.")
+
+
     async def main(self):
         await self.send_message("hello") 
 
@@ -174,16 +186,20 @@ class EvalClientProcess:
 
             await self.send_message(json.dumps(x))
 
-            success, timeout, text_received = await self.receive_message(self.timeout)
+            try:
+                success, timeout, text_received = await self.receive_message(self.timeout)
 
-            if success:
-                eval_to_engine_queue.put(text_received)
-            else:
-                printError("[EVALUATION CLIENT] ERROR! NO REPLY RECEIVED FROM EVAL_SERVER!")
+                if success:
+                    eval_to_engine_queue.put(text_received)
+                else:
+                    printError("[EVALUATION CLIENT] ERROR! NO REPLY RECEIVED FROM EVAL_SERVER!")
+            except:
+                printError("[EVALUATION CLIENT] ERROR! INVALID REPLY RECEIVED FROM EVAL_SERVER!")
 
 
     def run(self):
         try:
+            atexit.register(self.cleanup)
             asyncio.run(self.main())
         except KeyboardInterrupt:
             pass
@@ -200,8 +216,9 @@ class RelayCommsProcess:
         self.timeout = None
         self.is_running = True
         self.sn = sn
+        self.port = 10000 + self.sn
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(('', 10000 + self.sn)) # Binds to p1 relay on 10001, p2 relay on 10002
+        self.sock.bind(('', self.port)) # Binds to p1 relay on 10001, p2 relay on 10002
 
 
     async def receive_message(self, timeout):
@@ -276,26 +293,35 @@ class RelayCommsProcess:
                     relay_mlai_queues[self.sn - 1].put(text_received)
 
 
-    def run(self):
+    def cleanup(self):
         try:
-            asyncio.run(self.main())
-        except KeyboardInterrupt:
-            pass
+            if self.port is not None:
+                self.port.shutdown(SHUT_RDWR)
+                self.port.close()
+                self.port = None
+            self.sock.close()
+        except Exception as e:
+            printError("[RELAY " + str(self.sn) + "] Failed to shutdown.")
+
+
+    def run(self):
+        atexit.register(self.cleanup)
+        asyncio.run(self.main())
         
 
 
 
 '''
-This process reads from the gun queue. By default it has no timeout.
+This process reads from the gun queue. By default it has no timeout. This implementation is based off of queues and timeouts,
+which is less intuitive than the polling and timer version.
 When it receives a vest fired, it checks the fire time of the opposing gun.
     If it was within the GUN_WINDOW, then it is counted as a hit.
     If it was not, then updates the hit time of the vest. 
 When it receives a gun fired, it checks the hit time of the opposing vest. 
     If it was within the GUN_WINDOW, then it is counted as a hit.
-    If it was not, then it updates the fire time of this gun. The queue timeout is then set as the GUN_WINDOW. *(Note below)
-        If it times out, then it is a miss. It then checks if there is pending timeout for the other gun and sets the timeout
-        accordingly. If there isn't, then the timeout is set to None once more.
-*(Note) If another gun's GUN_WINDOW is still active then the timeout is set to its timeout instead.
+    If it was not, then it updates the fire time of this gun. The queue timeout is then set as the GUN_WINDOW.
+        If it times out, then it is a miss. 
+*(Note) For all of these cases, if another gun's GUN_WINDOW is still active then the timeout is set to its timeout instead.
 '''
 class GunLogicThread:
 
@@ -369,7 +395,6 @@ class GunLogicThread:
                         else:
                             p1gun = currtime
                             p1gunflag = True
-                            # if p2 window is still active we set the timeout to its remaining time otherwise we set it to the default value for this shot
                             if p2gunflag:
                                 timeout = p2gun + GUN_WINDOW - currtime
                             else:
@@ -389,7 +414,6 @@ class GunLogicThread:
                         else:
                             p2gun = currtime
                             p2gunflag = True
-                            # if p1 window is still active we set the timeout to its remaining time otherwise we set it to the default value for this shot
                             if p1gunflag:
                                 timeout = p1gun + GUN_WINDOW - currtime
                             else:
@@ -405,7 +429,6 @@ class GunLogicThread:
                     }
                     to_engine_queue.put(x)
                     p1gunflag = False
-                    # we check if there is still a pending timeout for the other gun
                     if p2gunflag:
                         timeout = p2gun + GUN_WINDOW - currtime
                     else:
@@ -418,7 +441,6 @@ class GunLogicThread:
                         "isHit": False
                     }
                     to_engine_queue.put(x)
-                    # same as above
                     p2gunflag = False
                     if p1gunflag:
                         timeout = p1gun + GUN_WINDOW - currtime
@@ -435,8 +457,8 @@ If it receives 30 packets it proceeds.
 If timeout:
     If it receives more than 28 packets it proceeds.
     Otherwise it discards it.
-There is a safeguard to block any action published within COOLDOWN of each other from the same player since it is likely that the onset detection has fired twice
-by accident.
+There is a safeguard to block any action published within the DOUBLE_ACTION_WINDOW of each other from the same player since it is likely that the onset 
+detection has fired twice by accident.
 '''
 class ClassificationProcess:
 
@@ -556,6 +578,9 @@ class ClassificationProcess:
 '''
 This is the game engine. It receives hit confirmations via MQTT and updates the game state accordingly. If it is a hit (valid action) it passes the
 action and game state to the eval_client for verification. It then puts the updated game state on the draw queue.
+(Note) This implementation will completely brick/jam in the case of a double action from the same player, or an action from p2 in 1p eval. This is because
+we are always waiting for a reply from the eval server that will never come in those scenarios. This is a conscious design decision since due to the noDupes
+system we should never ever encounter such a scenario unless the hardware fails to reconnect, in which case it is already a catastrophic failure.
 '''
 class GameEngine:
 
@@ -641,10 +666,17 @@ class GameEngine:
                     printEngineError(" WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
                     self.game_state.overwrite(eval_server_game_state)
 
-            if valid: # only draw valid actions
-                action = msg["action"]
-            else:
+            if msg["action"] == 'none':
                 action = "none"
+            else:
+                # only draw valid actions
+                if valid: 
+                    action = msg["action"]
+                # This will print an invalid message on visualiser, and is for the case when the player attempts to throw
+                # a grenade without any remaining, shielding while they still have a shield, or reloading while they still
+                # have bullets. Note that the action action itself was already sent to eval server
+                else: 
+                    action = "invalid"
 
             # put updated game state on queue for drawing
             x = {
@@ -723,12 +755,17 @@ engine.start()
 classification1.start()
 classification2.start()
 
-relay1.join()
-relay2.join()
-gun.join()
-engine.join()
-classification1.join()
-classification2.join()
-
-if not freePlay:
-    evalclient.join()
+try:
+    # using a queue to block forever so I don't need to poll
+    block = Queue()
+    block.get()
+except KeyboardInterrupt:
+    relay1.terminate()
+    relay2.terminate()
+    gun.terminate()
+    engine.terminate()
+    classification1.terminate()
+    classification2.terminate()
+    if not freePlay:
+        eval_client.terminate()
+    printInfo("[MAIN] Program terminated successfully.")

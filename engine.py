@@ -141,7 +141,7 @@ class GameState:
         elif action in {"web", "portal", "punch", "hammer", "spear"}:
             return attacker.generic_action(defender, isHit)
         
-        elif action in {"logout", "logoutquery", "logoutcancel"}:
+        elif action in {"logout"}:
             # logout
             return True
 
