@@ -6,7 +6,6 @@ import numpy as np
 from numpy.fft import fft, ifft
 
 from standardisations import means, stds
-from standardisations_end import means_end, stds_end
 from random import randint
 
 

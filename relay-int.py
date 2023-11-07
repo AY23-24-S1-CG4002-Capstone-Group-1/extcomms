@@ -38,7 +38,7 @@ class RelayClient:
 
     
     async def main(self):
-        self.sock.connect(('172.26.190.39', 10000 + self.sn)) 
+        self.sock.connect(('172.26.190.113', 10000 + self.sn)) 
 
         print("connected")
 

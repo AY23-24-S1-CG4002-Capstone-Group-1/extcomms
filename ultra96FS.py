@@ -11,6 +11,8 @@ import base64
 import json
 import asyncio
 import atexit
+import random
+import queue
 
 from engine import GameState
 from predict import predict_action
@@ -582,6 +584,15 @@ action and game state to the eval_client for verification. It then puts the upda
 (Note) This implementation will completely brick/jam in the case of a double action from the same player, or an action from p2 in 1p eval. This is because
 we are always waiting for a reply from the eval server that will never come in those scenarios. This is a conscious design decision since due to the noDupes
 system we should never ever encounter such a scenario unless the hardware fails to reconnect, in which case it is already a catastrophic failure.
+
+A failsafe has been added to the game engine. This failsafe operates on the following assumptions:
+- At least one glove/gun is still connected.
+- The first player goes within the first 20-30s, since otherwise the 30s timeout will not be in time before eval server timeout.
+- Classified actions are assumed to be correct.
+When the first player goes, a 30s timeout starts, after which the game engine will automatically send an action to the game server to prevent timeout and
+this will keep the round system working. This action defaults to gun since it comprises most of the actions. When the system times out, a timeout flag will 
+be set for that player. If a gun action is received later on from that player then it is assumed that the gun is working and it will start to predict actions
+instead. The system does try to keep track of classified actions to predict future actions. On round 24 and 25 it will always predict logout.
 '''
 class GameEngine:
 
@@ -607,9 +618,27 @@ class GameEngine:
             print("Failed to connect, return code %d\n", rc)
 
 
+    def getActionList(self):
+        actions = ["portal", "web", "shield", "hammer", "grenade", "spear", "reload", "punch"]
+        actions.extend(actions)
+        return actions
+
+
     def run(self):
         p1flag = False
         p2flag = False
+
+        # variables to handle timeout prediction, flags for having timed out and predict type
+        p1timeout = False
+        p2timeout = False
+        p1ptype = "gun"
+        p2ptype = "gun"
+        timeout = None
+        lastaction = perf_counter()
+        roundcount = 1
+        actions = ["portal", "web", "shield", "hammer", "grenade", "spear", "reload", "punch",  'logout', 'none']
+        p1actions = self.getActionList()
+        p2actions = self.getActionList()
 
         mqttclient = self.connect_mqtt()
         mqttclient.loop_start()
@@ -618,87 +647,187 @@ class GameEngine:
         mqttclient.on_message = self.on_message
 
         while True:
-            msg = to_engine_queue.get()
+            try:
+                msg = to_engine_queue.get(timeout = timeout)
 
-            if debug:
-                if msg["player_id"] == "1":
-                    printEngineP1("Update:" + str(msg))
-                else:
-                    printEngineP2("Update:" + str(msg))
-
-            # if we check for dupes we do not accept dupes from the same player
-            if noDupes and not msg["action"] == "none":
-                player_id = msg["player_id"]
-                if player_id == "1" and p1flag == True:
-                    continue
-                if player_id == "2" and p2flag == True:
-                    continue
-
-                # never allow a player to send 2 consecutive actions in the same round (2 player)
-                if player_id == "1":
-                    if p2flag == True:
-                        p2flag = False
+                if debug:
+                    if msg["player_id"] == "1":
+                        printEngineP1("Update:" + str(msg))
                     else:
-                        p1flag = True
-                else:
-                    if p1flag == True:
-                        p1flag = False
+                        printEngineP2("Update:" + str(msg))
+
+                # if we check for dupes we do not accept dupes from the same player
+                if noDupes:
+                    if msg["action"] == "none":
+                        if p1flag == False and p2flag == False:
+                            pass
+                        else:
+                            timeout = 30 + lastaction - perf_counter() 
+
                     else:
-                        p2flag = True
+                        player_id = msg["player_id"]
+                        action = msg["action"]
 
-            # update gamestate
-            valid = self.game_state.update(msg) 
+                        # if player timeout is in effect by default we predict gun. If we receive a gun from them then we swap to
+                        # predicting actions and vice versa
+                        if player_id == "1" and p1timeout == True:
+                            if action == "gun" and p1ptype == "gun":
+                                p1ptype = "action"
+                            if action in actions and p1ptype == "action":
+                                p1ptype = "gun"
 
-            x = {
-                "player_id": msg["player_id"],
-                "action": msg["action"],
-                "game_state": self.game_state.get_dict()
-            }
+                        if player_id == "2" and p2timeout == True:
+                            if action == "gun" and p2ptype == "gun":
+                                p2ptype = "action"
+                            if action in actions and p2ptype == "action":
+                                p2ptype = "gun"
+
+                        # if a player is blocked we discard the action 
+                        if player_id == "1" and p1flag == True:
+                            timeout = 30 + lastaction - perf_counter() 
+                            continue
+                        if player_id == "2" and p2flag == True:
+                            timeout = 30 + lastaction - perf_counter() 
+                            continue
+
+                        # never allow a player to send 2 consecutive actions in the same round (2 player)
+                        if player_id == "1":
+                            if p2flag == True:
+                                p2flag = False
+                                timeout = None
+                                roundcount += 1
+                            else:
+                                p1flag = True
+                                timeout = 30
+                            if action in p1actions:
+                                p1actions.remove(action)
+                        else:
+                            if p1flag == True:
+                                p1flag = False
+                                timeout = None
+                                roundcount += 1
+                            else:
+                                p2flag = True
+                                timeout = 30
+                            if action in p2actions:
+                                p2actions.remove(action)
+                    
+                    lastaction = perf_counter()
+
+                # update gamestate
+                valid = self.game_state.update(msg) 
+
+                x = {
+                    "player_id": msg["player_id"],
+                    "action": msg["action"],
+                    "game_state": self.game_state.get_dict()
+                }
+                
+                # we dont send our actions to eval server in freeplay, or custom actions to the eval server at all
+                if not freePlay and not msg["action"] == "none":
+                    engine_to_eval_queue.put(json.dumps(x))
+
+                    try:
+                        # NOTE: THIS IS BLOCKING because we need verification from eval server, and we want to avoid desync
+                        eval_server_game_state = json.loads(eval_to_engine_queue.get())
+
+                        # overwrite our game state with the eval server's if ours is wrong
+                        if eval_server_game_state != self.game_state.get_dict(): 
+                            printEngineError(" WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
+                            self.game_state.overwrite(eval_server_game_state)
+                        
+                    except:
+                        printEngineError("ERROR! INVALID JSON RECEIVED FROM EVAL SERVER")
+
+                if msg["action"] == 'none':
+                    action = "none"
+                else:
+                    # only draw valid actions
+                    if valid: 
+                        action = msg["action"]
+                    # This will print an invalid message on visualiser, and is for the case when the player attempts to throw
+                    # a grenade without any remaining, shielding while they still have a shield, or reloading while they still
+                    # have bullets. Note that the action action itself was already sent to eval server
+                    else: 
+                        action = "invalid"
+
+                # put updated game state on queue for drawing
+                x = {
+                    "type": "UPDATE",
+                    "player_id": msg["player_id"],
+                    "action": action,
+                    "isHit": msg["isHit"],
+                    "game_state": self.game_state.get_dict()
+                }
+
+                if debug:
+                    if msg["player_id"] == "1":
+                        printEngineP1("Final update forwarded to viz:" + json.dumps(x))
+                    else:
+                        printEngineP2("Final update forwarded to viz:" + json.dumps(x))
+                        
+                mqttclient.publish("lasertag/vizgamestate", json.dumps(x))
             
-            # we dont send our actions to eval server in freeplay, or custom actions to the eval server at all
-            if not freePlay and not msg["action"] == "none":
-                engine_to_eval_queue.put(json.dumps(x))
-
-                try:
-                    # NOTE: THIS IS BLOCKING because we need verification from eval server, and we want to avoid desync
-                    eval_server_game_state = json.loads(eval_to_engine_queue.get())
-
-                    # overwrite our game state with the eval server's if ours is wrong
-                    if eval_server_game_state != self.game_state.get_dict(): 
-                        printEngineError(" WARNING: EVAL SERVER AND ENGINE DESYNC, RESYNCING")
-                        self.game_state.overwrite(eval_server_game_state)
-                except:
-                    printEngineError("ERROR! INVALID JSON RECEIVED FROM EVAL SERVER")
-
-            if msg["action"] == 'none':
-                action = "none"
-            else:
-                # only draw valid actions
-                if valid: 
-                    action = msg["action"]
-                # This will print an invalid message on visualiser, and is for the case when the player attempts to throw
-                # a grenade without any remaining, shielding while they still have a shield, or reloading while they still
-                # have bullets. Note that the action action itself was already sent to eval server
-                else: 
-                    action = "invalid"
-
-            # put updated game state on queue for drawing
-            x = {
-                "type": "UPDATE",
-                "player_id": msg["player_id"],
-                "action": action,
-                "isHit": msg["isHit"],
-                "game_state": self.game_state.get_dict()
-            }
-
-            if debug:
-                if msg["player_id"] == "1":
-                    printEngineP1("Final update forwarded to viz:" + json.dumps(x))
+            
+            # When we timeout (which only happens if noDupes is true) then we check the flags to see which player has not gone yet
+            # and generate a gun action by default.
+            except queue.Empty:
+                if p1flag:
+                    if roundcount >= 24:
+                        x = {
+                            "player_id": '2',
+                            "action": "logout",
+                            "isHit": True
+                        }
+                    elif p1ptype == "gun":
+                        x = {
+                            "player_id": '2',
+                            "action": "gun",
+                            "isHit": True
+                        }
+                    else:
+                        if p2actions:
+                            action = random.choice(p2actions)
+                        else:
+                            action = "web"
+                        x = {
+                            "player_id": '2',
+                            "action": action,
+                            "isHit": True
+                        }
+                    to_engine_queue.put(x)
+                    p2timeout = True
+                    printEngineError("TIMEOUT: ACTION PREDICTED FOR P2")
+                        
                 else:
-                    printEngineP2("Final update forwarded to viz:" + json.dumps(x))
-                    
-            mqttclient.publish("lasertag/vizgamestate", json.dumps(x))
-                    
+                    if roundcount >= 24:
+                        x = {
+                            "player_id": '1',
+                            "action": "logout",
+                            "isHit": True
+                        }
+                    elif p2ptype == "gun":
+                        x = {
+                            "player_id": '1',
+                            "action": "gun",
+                            "isHit": True
+                        }
+                    else:
+                        if p1actions:
+                            action = random.choice(p1actions)
+                        else:
+                            action = "web"
+                        x = {
+                            "player_id": '1',
+                            "action": action,
+                            "isHit": True
+                        }
+                    to_engine_queue.put(x)
+                    p1timeout = True
+                    printEngineError("TIMEOUT: ACTION PREDICTED FOR P1")
+
+
+
 
 if sys.argv[1] == "1":
     debug = True
