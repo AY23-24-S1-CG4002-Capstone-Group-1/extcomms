@@ -39,13 +39,16 @@ debug = False
 noDupes = False
 freePlay = False
 # BROKER = 'broker.emqx.io'
-BROKER = '54.244.173.190' # This is broker.emqx.io but we faced some issues with DNS resolution once so it's safer to use this.
+# BROKER = '54.244.173.190' # This is broker.emqx.io but we faced some issues with DNS resolution once so it's safer to use this.
+BROKER = 'test.mosquitto.org'
 
 DOUBLE_ACTION_WINDOW = 4.0
 GUN_WINDOW = 0.6
 SENSOR_WINDOW = 0.5
 HIT_MESSAGE = "KANA SHOT"
 SHOOT_MESSAGE = "SHOTS FIRED"
+SECOND_PLAYER_TIMEOUT = 30
+NEW_ROUND_GUARD_WINDOW = 0.5
 
 
 def printError(msg): print("\033[41m\033[37m{}\033[00m" .format(msg))
@@ -639,6 +642,10 @@ class GameEngine:
         actions = ["portal", "web", "shield", "hammer", "grenade", "spear", "reload", "punch",  'logout', 'none']
         p1actions = self.getActionList()
         p2actions = self.getActionList()
+        p1guncount = 0
+        p2guncount = 0
+
+        freeze_time = perf_counter()
 
         mqttclient = self.connect_mqtt()
         mqttclient.loop_start()
@@ -658,11 +665,20 @@ class GameEngine:
 
                 # if we check for dupes we do not accept dupes from the same player
                 if noDupes:
+                    
+                    # if we detect a long response time from eval server, odds are the the action was queued up due to a misfire.
+                    # We will then update the freeze_time to the time when the reply was received, and then consequently we block
+                    # all following actions within a short time frame since they are likely also misfires that have been queued up.
+                    if perf_counter() < freeze_time + NEW_ROUND_GUARD_WINDOW:
+                        continue
+
                     if msg["action"] == "none":
+                        # none action will not start 30s timeout
                         if p1flag == False and p2flag == False:
                             pass
+                        # we continue the active timeout when none action is received
                         else:
-                            timeout = 30 + lastaction - perf_counter() 
+                            timeout = SECOND_PLAYER_TIMEOUT + lastaction - perf_counter() 
 
                     else:
                         player_id = msg["player_id"]
@@ -684,10 +700,10 @@ class GameEngine:
 
                         # if a player is blocked we discard the action 
                         if player_id == "1" and p1flag == True:
-                            timeout = 30 + lastaction - perf_counter() 
+                            timeout = SECOND_PLAYER_TIMEOUT + lastaction - perf_counter() 
                             continue
                         if player_id == "2" and p2flag == True:
-                            timeout = 30 + lastaction - perf_counter() 
+                            timeout = SECOND_PLAYER_TIMEOUT + lastaction - perf_counter() 
                             continue
 
                         # never allow a player to send 2 consecutive actions in the same round (2 player)
@@ -698,9 +714,13 @@ class GameEngine:
                                 roundcount += 1
                             else:
                                 p1flag = True
-                                timeout = 30
+                                timeout = SECOND_PLAYER_TIMEOUT
                             if action in p1actions:
                                 p1actions.remove(action)
+                            if action == "gun":
+                                p1guncount += 1
+                                if p1guncount >= 7:
+                                    p1ptype = "action"
                         else:
                             if p1flag == True:
                                 p1flag = False
@@ -708,18 +728,37 @@ class GameEngine:
                                 roundcount += 1
                             else:
                                 p2flag = True
-                                timeout = 30
+                                timeout = SECOND_PLAYER_TIMEOUT
                             if action in p2actions:
                                 p2actions.remove(action)
-                    
-                    lastaction = perf_counter()
+                            if action == "gun":
+                                p2guncount += 1
+                                if p2guncount >= 7:
+                                    p2ptype = "action"
 
                 # update gamestate
-                valid = self.game_state.update(msg) 
+                valid = self.game_state.update(msg)
+
+                action = msg["action"]
+                
+                # we handle timeoutactions here
+                if action == "guntimeout":
+                    action = "gun"
+                elif action == "actiontimeout":
+                    if msg["player_id"] == "1":
+                        if p1actions:
+                            action = random.choice(p1actions)
+                        else:
+                            action = "web"
+                    else:
+                        if p2actions:
+                            action = random.choice(p2actions)
+                        else:
+                            action = "web"
 
                 x = {
                     "player_id": msg["player_id"],
-                    "action": msg["action"],
+                    "action": action,
                     "game_state": self.game_state.get_dict()
                 }
                 
@@ -728,8 +767,14 @@ class GameEngine:
                     engine_to_eval_queue.put(json.dumps(x))
 
                     try:
+                        send_time = perf_counter()
+
                         # NOTE: THIS IS BLOCKING because we need verification from eval server, and we want to avoid desync
                         eval_server_game_state = json.loads(eval_to_engine_queue.get())
+
+                        response_time = perf_counter() - send_time
+                        if response_time > 2.0:
+                            freeze_time = perf_counter()
 
                         # overwrite our game state with the eval server's if ours is wrong
                         if eval_server_game_state != self.game_state.get_dict(): 
@@ -738,6 +783,10 @@ class GameEngine:
                         
                     except:
                         printEngineError("ERROR! INVALID JSON RECEIVED FROM EVAL SERVER")
+
+                # keep track of last action time to be able to update timeout, assumption is that it is near instantaneous from this point
+                # since its not blocked by eval server
+                lastaction = perf_counter()
 
                 if msg["action"] == 'none':
                     action = "none"
@@ -779,20 +828,16 @@ class GameEngine:
                             "action": "logout",
                             "isHit": True
                         }
-                    elif p1ptype == "gun":
+                    elif p2ptype == "gun":
                         x = {
                             "player_id": '2',
-                            "action": "gun",
+                            "action": "guntimeout",
                             "isHit": True
                         }
                     else:
-                        if p2actions:
-                            action = random.choice(p2actions)
-                        else:
-                            action = "web"
                         x = {
                             "player_id": '2',
-                            "action": action,
+                            "action": "actiontimeout",
                             "isHit": True
                         }
                     to_engine_queue.put(x)
@@ -806,25 +851,23 @@ class GameEngine:
                             "action": "logout",
                             "isHit": True
                         }
-                    elif p2ptype == "gun":
+                    elif p1ptype == "gun":
                         x = {
                             "player_id": '1',
-                            "action": "gun",
+                            "action": "guntimeout",
                             "isHit": True
                         }
                     else:
-                        if p1actions:
-                            action = random.choice(p1actions)
-                        else:
-                            action = "web"
                         x = {
                             "player_id": '1',
-                            "action": action,
+                            "action": "actiontimeout",
                             "isHit": True
                         }
                     to_engine_queue.put(x)
                     p1timeout = True
                     printEngineError("TIMEOUT: ACTION PREDICTED FOR P1")
+
+                timeout = None
 
 
 
@@ -900,5 +943,5 @@ except KeyboardInterrupt:
     classification1.terminate()
     classification2.terminate()
     if not freePlay:
-        eval_client.terminate()
+        evalclient.terminate()
     printInfo("[MAIN] Program terminated successfully.")

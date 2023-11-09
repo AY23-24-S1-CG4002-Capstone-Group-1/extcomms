@@ -7,6 +7,7 @@ from paho.mqtt import client as mqttclient
 import threading
 
 BROKER = 'broker.emqx.io'
+# BROKER = 'test.mosquitto.org'
 
 relay_queue = Queue()
 mqtt_queue = Queue()
@@ -52,6 +53,7 @@ class RelayClient:
                     for i in range(32):
                         msg = "{" + str(randint(0, 256)) + ","  + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) \
                         + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "}"
+                        print(msg)
                         await self.send_message(msg)
                 if command == "drop":
                     for i in range(26):
