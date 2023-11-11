@@ -6,7 +6,8 @@ from queue import Queue
 from paho.mqtt import client as mqttclient
 import threading
 
-BROKER = 'broker.emqx.io'
+BROKER = '116.15.202.187'
+# BROKER = 'broker.emqx.io'
 # BROKER = 'test.mosquitto.org'
 
 relay_queue = Queue()

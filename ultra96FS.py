@@ -40,7 +40,8 @@ noDupes = False
 freePlay = False
 # BROKER = 'broker.emqx.io'
 # BROKER = '54.244.173.190' # This is broker.emqx.io but we faced some issues with DNS resolution once so it's safer to use this.
-BROKER = 'test.mosquitto.org'
+# BROKER = 'test.mosquitto.org'
+BROKER = '116.15.202.187'
 
 DOUBLE_ACTION_WINDOW = 4.0
 GUN_WINDOW = 0.6
@@ -596,6 +597,9 @@ When the first player goes, a 30s timeout starts, after which the game engine wi
 this will keep the round system working. This action defaults to gun since it comprises most of the actions. When the system times out, a timeout flag will 
 be set for that player. If a gun action is received later on from that player then it is assumed that the gun is working and it will start to predict actions
 instead. The system does try to keep track of classified actions to predict future actions. On round 24 and 25 it will always predict logout.
+
+If the eval server takes more than 2s to reply it is likely that the action had been queued up. As a result we will discard all actions received in the next 500ms
+since they are likely to have been misfires that were queued up as well.
 '''
 class GameEngine:
 
