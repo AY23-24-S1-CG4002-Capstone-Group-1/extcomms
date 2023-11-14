@@ -113,7 +113,7 @@ class MQTTClient:
         mqttclient.subscribe("lasertag/vizgamestate")
         mqttclient.on_message = self.on_message
 
-        if not mqtt_queue.empty():
+        while True:
             msg = mqtt_queue.get()
             if msg['type'] == "UPDATE":
                 if self.sn == 1:
@@ -137,7 +137,7 @@ mqtt_thread = threading.Thread(target=mqtt_client.run)
 mqtt_thread.start()
 
 # ic_thread.join()
-relay_thread.join()
-mqtt_thread.join()
+# relay_thread.join()
+# mqtt_thread.join()
 
 

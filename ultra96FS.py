@@ -1,8 +1,10 @@
 '''
 Enter 3 args: 
 debug   : Prints debug messages
-noDupes : 2p mode any player cannot go twice before the other
+noDupes : 2p mode any player cannot go twice before the other, includes round system and eval server related safeguards
 freePlay: No eval server
+
+Note that this code does not run on Windows since it uses spawn instead of fork, which will throw an error. 
 '''
 
 import sys
@@ -43,12 +45,20 @@ freePlay = False
 # BROKER = 'test.mosquitto.org'
 BROKER = '116.15.202.187'
 
-DOUBLE_ACTION_WINDOW = 4.0
-GUN_WINDOW = 0.6
+# period of time for which actions are blocked after an action goes through, player specific
+DOUBLE_ACTION_WINDOW = 2.0 
+# period of time for which gun/vest will wait for the opposing vest/gun to fire and count as a hit
+GUN_WINDOW = 0.3
+# period of time for which the classification thread will wait for further sensor readings before deeming it to be the end of transmission
 SENSOR_WINDOW = 0.5
+
+# strings sent from relay
 HIT_MESSAGE = "KANA SHOT"
 SHOOT_MESSAGE = "SHOTS FIRED"
+
+# period of time for which game engine will wait for the second player before predicting an action
 SECOND_PLAYER_TIMEOUT = 30
+# when there is a late response from the eval server (indicative of a queued action) this is the period of time for which actions from the queue will be ignored
 NEW_ROUND_GUARD_WINDOW = 0.5
 
 
@@ -496,6 +506,7 @@ class ClassificationProcess:
         buffer = [0]*(30*8)
         pointer = 0
         lastaction = perf_counter()
+        blockwindow = DOUBLE_ACTION_WINDOW
         timeout = None
         toPublish = False
 
@@ -555,7 +566,7 @@ class ClassificationProcess:
 
             if toPublish:
                 # funky measure to stop actions that occur within 3s because they are likely to be misfires
-                if perf_counter() > lastaction + DOUBLE_ACTION_WINDOW:
+                if perf_counter() > lastaction + blockwindow:
                     x = {
                         "type": "QUERY",
                         "player_id": self.sn,
@@ -578,6 +589,11 @@ class ClassificationProcess:
                 
                 buffer = [0]*(30*8)
                 toPublish = False
+                # if action is hammer then we block for an extended period of time because it is likely to triple fire
+                if action == 3:
+                    blockwindow = 2 * DOUBLE_ACTION_WINDOW
+                else:
+                    blockwindow = DOUBLE_ACTION_WINDOW
 
 
 
@@ -821,7 +837,6 @@ class GameEngine:
                         
                 mqttclient.publish("lasertag/vizgamestate", json.dumps(x))
             
-            
             # When we timeout (which only happens if noDupes is true) then we check the flags to see which player has not gone yet
             # and generate a gun action by default.
             except queue.Empty:
@@ -886,8 +901,6 @@ if sys.argv[3] == "1":
     freePlay = True
 
 if not freePlay:
-    # actual server
-    # host = "172.25.76.133"
     host = "127.0.0.1"
     secret_key = bytes(str('1111111111111111'), encoding="utf8")  # Convert password to bytes
 

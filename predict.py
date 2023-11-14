@@ -49,22 +49,22 @@ def pre_process(reading, end_flag):
             temp[j][i] = reading[count]
             count += 1
             
-    for j in range(8):
+    for j in range(6):
         data.extend(temp[j])
     for j in range(6):
         data.extend(fft_funct(temp[j], 30))  
     
     #standardise
-    data = np.array(data).reshape(14,30)
+    data = np.array(data).reshape(12,30)
     count = 0
     if end_flag == 1:
         for i in range(30): 
-            for j in range(14): 
+            for j in range(12): 
                 data[j][i] = ((data[j][i] - means_end[j])/stds_end[j])*(2**16)
     else:
         for i in range(30): 
-            for j in range(14): 
-                data[j][i] = ((data[j][i] - means[j])/stds[j])*(2**16)
+            for j in range(12): 
+                data[j][i] = ((data[j][i] - means[j])/stds[j])*(2**20)
 
     data = data.flatten().tolist()
     return data
@@ -86,7 +86,7 @@ def predict_action(readings, end_flag, ol):
     data = pre_process(readings, end_flag)
     
     #allocate buffer space
-    data_size = 14*30
+    data_size = 12*30
     input_buffer = allocate(shape=(data_size,), dtype=np.int32)
     output_buffer = allocate(shape=(1,), dtype=np.uint32)
     
