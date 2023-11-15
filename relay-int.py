@@ -4,6 +4,7 @@ import asyncio
 from random import randint
 from queue import Queue
 from paho.mqtt import client as mqttclient
+from time import sleep
 import threading
 
 BROKER = '116.15.202.187'
@@ -40,7 +41,7 @@ class RelayClient:
 
     
     async def main(self):
-        self.sock.connect(('172.26.190.113', 10000 + self.sn)) 
+        self.sock.connect(('172.26.191.64', 10000 + self.sn)) 
 
         print("connected")
 
@@ -56,16 +57,19 @@ class RelayClient:
                         + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "}"
                         print(msg)
                         await self.send_message(msg)
+                        sleep(0.008)
                 if command == "drop":
                     for i in range(26):
                         msg = "{" + str(randint(0, 256)) + ","  + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) \
                         + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "}"
                         await self.send_message(msg)
+                        sleep(0.008)
                 if command == "double":
                     for i in range(60):
                         msg = "{" + str(randint(0, 256)) + ","  + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) \
                         + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "," + str(randint(0, 256)) + "}"
                         await self.send_message(msg)
+                        sleep(0.008)
                 if command == "both":
                     await self.send_message("KANA SHOT")
                     await self.send_message("SHOTS FIRED")

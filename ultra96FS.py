@@ -23,7 +23,7 @@ from time import perf_counter
 from Crypto import Random
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad, pad
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Lock
 from paho.mqtt import client as mqttclient
 from socket import SHUT_RDWR
 
@@ -36,6 +36,8 @@ gun_process_queue = Queue()
 to_engine_queue = Queue()
 
 relay_mlai_queues = [Queue() , Queue()]
+
+dma_lock = Lock()
 
 debug = False
 noDupes = False
@@ -533,7 +535,10 @@ class ClassificationProcess:
                             else:
                                 printP2("[P2 CLASSIFICATION] Received " + str(pointer + 1) + "(full) packets, action to be identified")
 
+                        dma_lock.acquire()
                         action = actions[predict_action(buffer, 0, self.ol)]
+                        dma_lock.release()
+
                         toPublish = True
                         pointer = 0
                         timeout = None
@@ -549,7 +554,10 @@ class ClassificationProcess:
                         else:
                             printP2("[P2 CLASSIFICATION] Received " + str(pointer + 1) + " packets, action to be identified")
 
+                    dma_lock.acquire()
                     action = actions[predict_action(buffer, 0, self.ol)]
+                    dma_lock.release()
+
                     toPublish = True
                     pointer = 0
                 # if too many packets are dropped we just discard it to be safe
