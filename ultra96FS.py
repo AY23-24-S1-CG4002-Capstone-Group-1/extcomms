@@ -48,7 +48,7 @@ freePlay = False
 BROKER = '116.15.202.187'
 
 # period of time for which actions are blocked after an action goes through, player specific
-DOUBLE_ACTION_WINDOW = 2.0 
+DOUBLE_ACTION_WINDOW = 3.0 
 # period of time for which gun/vest will wait for the opposing vest/gun to fire and count as a hit
 GUN_WINDOW = 0.3
 # period of time for which the classification thread will wait for further sensor readings before deeming it to be the end of transmission
@@ -61,7 +61,7 @@ SHOOT_MESSAGE = "SHOTS FIRED"
 # period of time for which game engine will wait for the second player before predicting an action
 SECOND_PLAYER_TIMEOUT = 30
 # when there is a late response from the eval server (indicative of a queued action) this is the period of time for which actions from the queue will be ignored
-NEW_ROUND_GUARD_WINDOW = 0.5
+NEW_ROUND_GUARD_WINDOW = 1.0
 
 
 def printError(msg): print("\033[41m\033[37m{}\033[00m" .format(msg))
@@ -599,7 +599,7 @@ class ClassificationProcess:
                 toPublish = False
                 # if action is hammer then we block for an extended period of time because it is likely to triple fire
                 if action == 3:
-                    blockwindow = 2 * DOUBLE_ACTION_WINDOW
+                    blockwindow = 1.5 * DOUBLE_ACTION_WINDOW
                 else:
                     blockwindow = DOUBLE_ACTION_WINDOW
 
@@ -770,9 +770,14 @@ class GameEngine:
                 action = msg["action"]
                 
                 # we handle timeoutactions here
+                # note that timeout actions are always going to be the 2nd action and start of the new round
+                # if action comes in just before timeout we are fine, if action comes in just after timeout then it will eat into the next round so
+                # we block for a while
                 if action == "guntimeout":
+                    freeze_time = perf_counter()
                     action = "gun"
                 elif action == "actiontimeout":
+                    freeze_time = perf_counter()
                     if msg["player_id"] == "1":
                         if p1actions:
                             action = random.choice(p1actions)
