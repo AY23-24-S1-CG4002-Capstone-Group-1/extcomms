@@ -4,9 +4,9 @@ from time import perf_counter, sleep
 from statistics import median, mean
 from paho.mqtt import client as mqttclient
 
-BROKER = '116.15.202.187'
+# BROKER = '116.15.202.187'
 # BROKER = 'broker.emqx.io'
-# BROKER = 'test.mosquitto.org'
+BROKER = 'test.mosquitto.org'
 # BROKER = 'broker.hivemq.com'    
 
 

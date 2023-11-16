@@ -7,9 +7,8 @@ from paho.mqtt import client as mqttclient
 from time import sleep
 import threading
 
-BROKER = '116.15.202.187'
 # BROKER = 'broker.emqx.io'
-# BROKER = 'test.mosquitto.org'
+BROKER = 'test.mosquitto.org'
 
 relay_queue = Queue()
 mqtt_queue = Queue()
@@ -26,8 +25,6 @@ both: Fires both
 
 Also has a mqtt subscriber that will print the updated game state from the ultra96.
 '''
-
-
 class RelayClient:
     
     def __init__(self, sn):
@@ -139,9 +136,5 @@ relay_thread.start()
 mqtt_client = MQTTClient(sn)
 mqtt_thread = threading.Thread(target=mqtt_client.run)
 mqtt_thread.start()
-
-# ic_thread.join()
-# relay_thread.join()
-# mqtt_thread.join()
 
 

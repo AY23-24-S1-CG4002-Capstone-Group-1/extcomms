@@ -1,10 +1,24 @@
 '''
-Enter 3 args: 
-debug   : Prints debug messages
-noDupes : 2p mode any player cannot go twice before the other, includes round system and eval server related safeguards
-freePlay: No eval server
+This is the final version of the Ultra96 code. This code starts 7 processes:
+EvalClientProcess: Communicates with eval server, does not start in freePlay
+2*RelayClientProcess: Receives data from its relay node
+GunLogicProcess: Processes all gun and vest related information from both players
+2*ClassificationProcess: Identifies actions for its player, publishes via MQTT
+GameEngine: Deals with game logic.  
 
-Note that this code does not run on Windows since it uses spawn instead of fork, which will throw an error. 
+How to run: sudo -E python ultra96FS.py [debug] [noDupes] [freePlay]
+Args (1 or 0): 
+debug   : Prints debug messages.
+roundSystem : Round system. Players are blocked from going twice in a round, includes eval server related safeguards. Used for 2P eval.
+freePlay: No eval server.
+
+To kill: Ctrl-C
+NOTE: There are cleanup functions to ensure that the processes terminate properly and free up the ports, but sometimes they still remain in use
+for a short while after termination. However, in the situation where connection to the U96 is lost while this program is running and/or the program 
+is not terminated gracefully,
+Run sudo netstat --tcp --udp --listening --program repeatedly, kill the processes on 10001 and 10002.
+
+NOTE: This code cannot run on Windows since it uses spawn for processes instead of fork.
 '''
 
 import sys
@@ -40,12 +54,12 @@ relay_mlai_queues = [Queue() , Queue()]
 dma_lock = Lock()
 
 debug = False
-noDupes = False
+roundSystem = False
 freePlay = False
 # BROKER = 'broker.emqx.io'
 # BROKER = '54.244.173.190' # This is broker.emqx.io but we faced some issues with DNS resolution once so it's safer to use this.
-# BROKER = 'test.mosquitto.org'
-BROKER = '116.15.202.187'
+BROKER = 'test.mosquitto.org'
+# BROKER = 'xxxxxxxxxxxxxxxx' # Private broker 
 
 # period of time for which actions are blocked after an action goes through, player specific
 DOUBLE_ACTION_WINDOW = 3.0 
@@ -92,7 +106,6 @@ class EvalClientProcess:
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.ip_addr, self.port))
-        # Login
     
 
     async def send_message(self, msg):
@@ -471,13 +484,15 @@ class GunLogicProcess:
 
 '''
 This process will read from the relay_mlai_queue and identify the actions from sensor data, then publish it to the visualiser via MQTT. 
-Default timeout is none but when it receives packets it is set to the SENSOR_WINDOW. After an action has been identified the timeout is reset back to none.
+Default timeout is none but when it receives packets it is set to the SENSOR_WINDOW. After a timeout the timeout is reset back to none.
 If it receives 30 packets it proceeds.
 If timeout:
     If it receives more than 28 packets it proceeds.
     Otherwise it discards it.
 There is a safeguard to block any action published within the DOUBLE_ACTION_WINDOW of each other from the same player since it is likely that the onset 
-detection has fired twice by accident.
+detection has fired twice by accident. This window is increased for hammer due to its tendency to triple fire.
+
+There is also a lock on the prediction function since it involves DMA.
 '''
 class ClassificationProcess:
 
@@ -609,21 +624,21 @@ class ClassificationProcess:
 '''
 This is the game engine. It receives hit confirmations via MQTT and updates the game state accordingly. If it is a hit (valid action) it passes the
 action and game state to the eval_client for verification. It then puts the updated game state on the draw queue.
-(Note) This implementation will completely brick/jam in the case of a double action from the same player, or an action from p2 in 1p eval. This is because
-we are always waiting for a reply from the eval server that will never come in those scenarios. This is a conscious design decision since due to the noDupes
-system we should never ever encounter such a scenario unless the hardware fails to reconnect, in which case it is already a catastrophic failure.
+NOTE: This implementation will completely brick/jam in the case of a double action from the same player, or an action from p2 in 1p eval. This is because
+we are always waiting for a reply from the eval server that will never come in those scenarios. This is a conscious design decision since due to the round
+system we are highly unlikely to encounter such a scenario, due to the failsafe below.
 
 A failsafe has been added to the game engine. This failsafe operates on the following assumptions:
-- At least one glove/gun is still connected.
+- At least ONE glove/gun is still connected.
 - The first player goes within the first 20-30s, since otherwise the 30s timeout will not be in time before eval server timeout.
-- Classified actions are assumed to be correct.
+- Classified actions are assumed to be correct. (This one isn't really important, it is just used to help 'game' the system)
 When the first player goes, a 30s timeout starts, after which the game engine will automatically send an action to the game server to prevent timeout and
 this will keep the round system working. This action defaults to gun since it comprises most of the actions. When the system times out, a timeout flag will 
 be set for that player. If a gun action is received later on from that player then it is assumed that the gun is working and it will start to predict actions
 instead. The system does try to keep track of classified actions to predict future actions. On round 24 and 25 it will always predict logout.
 
-If the eval server takes more than 2s to reply it is likely that the action had been queued up. As a result we will discard all actions received in the next 500ms
-since they are likely to have been misfires that were queued up as well.
+If the eval server takes more than 2s to reply it is likely that the action had been queued up. As a result we will discard all actions received in the 
+NEW_ROUND_GUARD_WINDOW since they are likely to have been misfires that were queued up as well.
 '''
 class GameEngine:
 
@@ -656,23 +671,34 @@ class GameEngine:
 
 
     def run(self):
+        # round system flags
         p1flag = False
         p2flag = False
 
-        # variables to handle timeout prediction, flags for having timed out and predict type
+        # variables to handle timeout
+        # timeout flags
         p1timeout = False
         p2timeout = False
+        # prediction type
         p1ptype = "gun"
         p2ptype = "gun"
+        # queue timeout, set to 30s when 1st player goes
         timeout = None
+        # time of last action, required to update timeout since "none" does not stop the timeout
         lastaction = perf_counter()
+        # keeping track of rounds
         roundcount = 1
-        actions = ["portal", "web", "shield", "hammer", "grenade", "spear", "reload", "punch",  'logout', 'none']
+        # keeping track of actions left, assumes that past actions were correctly identified
         p1actions = self.getActionList()
         p2actions = self.getActionList()
+        # tracks gun actions sent
         p1guncount = 0
         p2guncount = 0
 
+        actions = ["portal", "web", "shield", "hammer", "grenade", "spear", "reload", "punch",  'logout', 'none']
+
+        # when a queued action is detected/ timeout action is sent this timer is updated and the entire game engine blocks actions for the 
+        # NEW_ROUND_GUARD_WINDOW
         freeze_time = perf_counter()
 
         mqttclient = self.connect_mqtt()
@@ -692,7 +718,7 @@ class GameEngine:
                         printEngineP2("Update:" + str(msg))
 
                 # if we check for dupes we do not accept dupes from the same player
-                if noDupes:
+                if roundSystem:
                     
                     # if we detect a long response time from eval server, odds are the the action was queued up due to a misfire.
                     # We will then update the freeze_time to the time when the reply was received, and then consequently we block
@@ -726,7 +752,7 @@ class GameEngine:
                             if action in actions and p2ptype == "action":
                                 p2ptype = "gun"
 
-                        # if a player is blocked we discard the action 
+                        # if a player is blocked we discard the action, timeout is not stopped either
                         if player_id == "1" and p1flag == True:
                             timeout = SECOND_PLAYER_TIMEOUT + lastaction - perf_counter() 
                             continue
@@ -734,19 +760,24 @@ class GameEngine:
                             timeout = SECOND_PLAYER_TIMEOUT + lastaction - perf_counter() 
                             continue
 
-                        # never allow a player to send 2 consecutive actions in the same round (2 player)
                         if player_id == "1":
+                            # here we know it is a new round since p2 has gone
                             if p2flag == True:
                                 p2flag = False
                                 timeout = None
                                 roundcount += 1
+                            # else we start the 30s timeout
                             else:
                                 p1flag = True
                                 timeout = SECOND_PLAYER_TIMEOUT
+                            # keep track of actions identified
                             if action in p1actions:
                                 p1actions.remove(action)
+                            # keep track of gun actions sent
                             if action == "gun":
                                 p1guncount += 1
+                                # here we change prediction type to action if 7 guns are sent, on the assumption that it is a
+                                # 24 round eval
                                 if p1guncount >= 7:
                                     p1ptype = "action"
                         else:
@@ -769,7 +800,7 @@ class GameEngine:
 
                 action = msg["action"]
                 
-                # we handle timeoutactions here
+                # we handle timeoutactions here, they do not update the predicted actions list, nor increment the gun counter
                 # note that timeout actions are always going to be the 2nd action and start of the new round
                 # if action comes in just before timeout we are fine, if action comes in just after timeout then it will eat into the next round so
                 # we block for a while
@@ -795,7 +826,7 @@ class GameEngine:
                     "game_state": self.game_state.get_dict()
                 }
                 
-                # we dont send our actions to eval server in freeplay, or custom actions to the eval server at all
+                # we dont send our actions to eval server in freeplay, or none actions to the eval server at all
                 if not freePlay and not msg["action"] == "none":
                     engine_to_eval_queue.put(json.dumps(x))
 
@@ -806,6 +837,8 @@ class GameEngine:
                         eval_server_game_state = json.loads(eval_to_engine_queue.get())
 
                         response_time = perf_counter() - send_time
+                        # such a long response time means that it was queued, and we only receive the reply when the next button is clicked
+                        # thus we know that something is wrong and we purge the queue
                         if response_time > 2.0:
                             freeze_time = perf_counter()
 
@@ -829,7 +862,7 @@ class GameEngine:
                         action = msg["action"]
                     # This will print an invalid message on visualiser, and is for the case when the player attempts to throw
                     # a grenade without any remaining, shielding while they still have a shield, or reloading while they still
-                    # have bullets. Note that the action action itself was already sent to eval server
+                    # have bullets. Note that the actual action itself was already sent to eval server, this is for clarity on the viz
                     else: 
                         action = "invalid"
 
@@ -850,7 +883,7 @@ class GameEngine:
                         
                 mqttclient.publish("lasertag/vizgamestate", json.dumps(x))
             
-            # When we timeout (which only happens if noDupes is true) then we check the flags to see which player has not gone yet
+            # When we timeout (which only happens if roundSystem is active) then we check the flags to see which player has not gone yet
             # and generate a gun action by default.
             except queue.Empty:
                 if p1flag:
@@ -908,7 +941,7 @@ if sys.argv[1] == "1":
     debug = True
 
 if sys.argv[2] == "1":
-    noDupes = True
+    roundSystem = True
 
 if sys.argv[3] == "1":
     freePlay = True
@@ -961,6 +994,7 @@ engine.start()
 classification1.start()
 classification2.start()
 
+# keeping the main process active forever so I can terminate everything gracefully with an interrupt
 try:
     # using a queue to block forever so I don't need to poll
     block = Queue()
